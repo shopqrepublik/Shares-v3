@@ -1,24 +1,38 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
 from app.models import init_db, SessionLocal, PositionSnapshot, MetricsDaily
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+import os
+import openai
 
-app = FastAPI(title="AI Portfolio Bot", version="0.4")
-
-# инициализируем БД
+# Инициализация БД
 init_db()
 
+# Настройка OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
+app = FastAPI(title="AI Portfolio Bot", version="0.5")
+
+
+# ---------- SCHEMAS ----------
+class RecommendReq(BaseModel):
+    prompt: str
+    strategy: str
+
+
+# ---------- HEALTH ----------
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
 
 
+# ---------- POSITIONS ----------
 @app.get("/positions")
 def get_positions():
-    """Возвращает список позиций"""
     db = SessionLocal()
     positions = db.query(PositionSnapshot).all()
     db.close()
@@ -35,9 +49,9 @@ def get_positions():
     ]
 
 
+# ---------- REPORT (JSON) ----------
 @app.get("/report/daily")
 def get_daily_report():
-    """JSON-отчёт с equity и PnL"""
     db = SessionLocal()
     last = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
     positions = db.query(PositionSnapshot).all()
@@ -65,9 +79,9 @@ def get_daily_report():
     }
 
 
+# ---------- REPORT (PDF) ----------
 @app.get("/report/pdf")
 def get_pdf_report():
-    """Генерирует PDF отчёт"""
     filename = "daily_report.pdf"
     db = SessionLocal()
     last = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
@@ -110,12 +124,10 @@ def get_pdf_report():
     return FileResponse(filename, media_type="application/pdf", filename="daily_report.pdf")
 
 
+# ---------- SEED TEST DATA ----------
 @app.post("/seed")
 def seed_data():
-    """Создаёт тестовые данные в БД для отчётов"""
     db = SessionLocal()
-
-    # Тестовые позиции
     db.add(PositionSnapshot(
         ts=datetime.utcnow(),
         ticker="AAPL",
@@ -132,8 +144,6 @@ def seed_data():
         market_price=710.0,
         market_value=3550.0
     ))
-
-    # Тестовые метрики
     db.add(MetricsDaily(
         ts=datetime.utcnow(),
         equity=10000.0,
@@ -141,7 +151,26 @@ def seed_data():
         pnl_total=1200.0,
         benchmark_value=400.0
     ))
-
     db.commit()
     db.close()
     return {"status": "seeded"}
+
+
+# ---------- AI RECOMMEND ----------
+@app.post("/ai/recommend")
+def ai_recommend(req: RecommendReq):
+    """
+    Получить рекомендации по акциям на основе стратегии и промта.
+    """
+    if not OPENAI_API_KEY:
+        return {"error": "OPENAI_API_KEY not configured"}
+
+    user_prompt = f"""
+    Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
+    проанализируй акции и предложи 3–5 тикеров, которые стоит купить. 
+    Объясни простым языком: {req.prompt}
+    """
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
