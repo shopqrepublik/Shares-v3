@@ -161,10 +161,11 @@ def seed_data():
 
 
 # ---------------- AI RECOMMEND ----------------
-from openai import OpenAI
-import os, json, yfinance as yf
+import os, json, re
+import yfinance as yf
 from fastapi import FastAPI
 from pydantic import BaseModel
+from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI()
@@ -175,9 +176,6 @@ class RecommendReq(BaseModel):
 
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
-    if not os.getenv("OPENAI_API_KEY"):
-        return {"error": "OPENAI_API_KEY not configured"}
-
     user_prompt = f"""
     Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
     предложи список из 3–5 акций в формате JSON:
@@ -185,7 +183,6 @@ def ai_recommend(req: RecommendReq):
       "tickers": ["AAPL", "MSFT", "NVDA"],
       "explanation": "Краткое объяснение стратегии и выбора"
     }}
-
     Ответ должен быть строго в JSON!
     Запрос пользователя: {req.prompt}
     """
@@ -202,8 +199,11 @@ def ai_recommend(req: RecommendReq):
 
     raw_answer = response.choices[0].message.content
 
+    # Убираем Markdown-обёртку
+    clean_answer = re.sub(r"^```json|```$", "", raw_answer, flags=re.MULTILINE).strip()
+
     try:
-        parsed = json.loads(raw_answer)
+        parsed = json.loads(clean_answer)
     except Exception:
         return {
             "strategy": req.strategy,
@@ -212,12 +212,15 @@ def ai_recommend(req: RecommendReq):
             "prices": {}
         }
 
-    # Подгрузка котировок
+    # Загружаем цены
     prices = {}
     for ticker in parsed.get("tickers", []):
         try:
             data = yf.Ticker(ticker).history(period="1d")
-            prices[ticker] = round(data["Close"].iloc[-1], 2)
+            if not data.empty:
+                prices[ticker] = round(data["Close"].iloc[-1], 2)
+            else:
+                prices[ticker] = None
         except Exception:
             prices[ticker] = None
 
