@@ -191,27 +191,40 @@ def ai_recommend(req: RecommendReq):
         }
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o-mini",  # можно заменить на gpt-4o или gpt-4.1 для продакшена
         messages=[
-            {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON."},
+            {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON с полями: tickers (список тикеров) и explanation (объяснение)."},
             {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
         ],
-        response_format={ "type": "json_object" }   # ✅ просим сразу JSON
+        response_format={"type": "json_object"}   # просим строго JSON
     )
 
-    # получаем чистый JSON без обёрток
-    parsed = response.choices[0].message.parsed or {}
+    parsed = {}
+    # ✅ пробуем взять .parsed (новый клиент openai>=1.43.0)
+    try:
+        parsed = response.choices[0].message.parsed
+    except AttributeError:
+        # fallback: чистим .content от markdown и парсим вручную
+        raw = response.choices[0].message.content or "{}"
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        try:
+            parsed = json.loads(clean)
+        except Exception as e:
+            print("Ошибка парсинга JSON:", e)
+            parsed = {}
 
     tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
     explanation = parsed.get("explanation", "")
 
-    # загружаем цены по тикерам
+    # Загружаем цены через yfinance
     prices = {}
     for ticker in tickers:
         try:
             data = yf.Ticker(ticker).history(period="5d")
             if not data.empty:
                 prices[ticker] = round(data["Close"].iloc[-1], 2)
+            else:
+                prices[ticker] = None
         except Exception:
             prices[ticker] = None
 
@@ -221,5 +234,3 @@ def ai_recommend(req: RecommendReq):
         "explanation": explanation,
         "prices": prices
     }
-
-
