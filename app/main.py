@@ -19,8 +19,8 @@ app = FastAPI(title="AI Portfolio Bot", version="1.2.0")
 init_db()
 
 # Alpaca client
-ALPACA_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY")
+ALPACA_KEY = os.getenv("PKVT34KMH6EOKGFR0MAN")
+ALPACA_SECRET = os.getenv("9ziJkgjcvjCv07ASbccfbfOh3gcAj4V4oyd8mL3V")
 ALPACA_BASE = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 BENCHMARK = os.getenv("BENCHMARK", "SPY")
 
