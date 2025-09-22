@@ -7,30 +7,34 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import os
 import openai
+import yfinance as yf
+import json
 
-# Инициализация БД
+# ---------------- INIT ----------------
+# DB init
 init_db()
 
-# Настройка OpenAI
+# OpenAI init
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
-app = FastAPI(title="AI Portfolio Bot", version="0.5")
+# FastAPI app
+app = FastAPI(title="AI Portfolio Bot", version="0.6")
 
 
-# ---------- SCHEMAS ----------
+# ---------------- SCHEMAS ----------------
 class RecommendReq(BaseModel):
     prompt: str
     strategy: str
 
 
-# ---------- HEALTH ----------
+# ---------------- HEALTH ----------------
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
 
 
-# ---------- POSITIONS ----------
+# ---------------- POSITIONS ----------------
 @app.get("/positions")
 def get_positions():
     db = SessionLocal()
@@ -49,7 +53,7 @@ def get_positions():
     ]
 
 
-# ---------- REPORT (JSON) ----------
+# ---------------- REPORT (JSON) ----------------
 @app.get("/report/daily")
 def get_daily_report():
     db = SessionLocal()
@@ -79,7 +83,7 @@ def get_daily_report():
     }
 
 
-# ---------- REPORT (PDF) ----------
+# ---------------- REPORT (PDF) ----------------
 @app.get("/report/pdf")
 def get_pdf_report():
     filename = "daily_report.pdf"
@@ -124,7 +128,7 @@ def get_pdf_report():
     return FileResponse(filename, media_type="application/pdf", filename="daily_report.pdf")
 
 
-# ---------- SEED TEST DATA ----------
+# ---------------- SEED TEST DATA ----------------
 @app.post("/seed")
 def seed_data():
     db = SessionLocal()
@@ -156,7 +160,7 @@ def seed_data():
     return {"status": "seeded"}
 
 
-# ---------- AI RECOMMEND ----------
+# ---------------- AI RECOMMEND ----------------
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
     """
@@ -167,10 +171,51 @@ def ai_recommend(req: RecommendReq):
 
     user_prompt = f"""
     Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
-    проанализируй акции и предложи 3–5 тикеров, которые стоит купить. 
-    Объясни простым языком: {req.prompt}
+    предложи список из 3–5 акций в формате JSON:
+    {{
+      "tickers": ["AAPL", "MSFT", "NVDA"],
+      "explanation": "Краткое объяснение стратегии и выбора"
+    }}
+
+    Ответ должен быть строго в JSON!
+    Запрос пользователя: {req.prompt}
     """
 
     response = openai.ChatCompletion.create(
         model="gpt-4o-mini",
         messages=[
+            {"role": "system", "content": "Ты помощник по инвестициям."},
+            {"role": "user", "content": user_prompt}
+        ],
+        max_tokens=600,
+        temperature=0.7,
+    )
+
+    raw_answer = response["choices"][0]["message"]["content"]
+
+    try:
+        parsed = json.loads(raw_answer)
+    except Exception:
+        return {
+            "strategy": req.strategy,
+            "tickers": [],
+            "explanation": raw_answer,
+            "prices": {}
+        }
+
+    # Подгружаем котировки через yfinance
+    prices = {}
+    for ticker in parsed.get("tickers", []):
+        try:
+            data = yf.Ticker(ticker).history(period="1d")
+            last_price = round(data["Close"].iloc[-1], 2)
+            prices[ticker] = last_price
+        except Exception:
+            prices[ticker] = None
+
+    return {
+        "strategy": req.strategy,
+        "tickers": parsed.get("tickers", []),
+        "explanation": parsed.get("explanation", ""),
+        "prices": prices
+    }
