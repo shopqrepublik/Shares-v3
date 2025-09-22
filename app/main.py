@@ -206,21 +206,16 @@ def ai_recommend(req: RecommendReq):
             "prices": {}
         }
 
-    # Загружаем цены (берём 5 дней, чтобы всегда было закрытие)
-    prices = {}
-    for ticker in parsed.get("tickers", []):
-        try:
-            data = yf.Ticker(ticker).history(period="5d")
-            if not data.empty:
-                prices[ticker] = round(data["Close"].iloc[-1], 2)
-            else:
-                prices[ticker] = None
-        except Exception:
+# Загружаем цены через yahooquery
+prices = {}
+for ticker in parsed.get("tickers", []):
+    try:
+        t = Ticker(ticker)
+        quote = t.price.get(ticker)
+        if quote and "regularMarketPrice" in quote:
+            prices[ticker] = quote["regularMarketPrice"]
+        else:
             prices[ticker] = None
+    except Exception:
+        prices[ticker] = None
 
-    return {
-        "strategy": req.strategy,
-        "tickers": parsed.get("tickers", []),
-        "explanation": parsed.get("explanation", ""),
-        "prices": prices
-    }
