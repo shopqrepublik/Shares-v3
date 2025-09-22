@@ -1,129 +1,94 @@
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List, Dict
-import requests
-import os
+from fastapi.responses import JSONResponse, FileResponse
+from app.models import init_db, SessionLocal, PositionSnapshot, MetricsDaily
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+import os
 
-# Alpaca credentials
-ALPACA_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
-ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
+app = FastAPI(title="AI Portfolio Bot", version="0.3")
 
-HEADERS = {
-    "APCA-API-KEY-ID": ALPACA_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-}
-
-app = FastAPI(title="AI Portfolio Bot", version="0.4")
+# Инициализация базы
+init_db()
 
 
-# -----------------------
-# Schemas
-# -----------------------
-class AllocationItem(BaseModel):
-    ticker: str
-    weight: float
-
-
-class Proposal(BaseModel):
-    allocations: List[Dict]
-    comment: str
-
-
-class OnboardReq(BaseModel):
-    budget_usd: float
-    horizon_months: int
-    risk_level: int
-    allow_microcap: bool
-
-
-# -----------------------
-# Endpoints
-# -----------------------
 @app.get("/ping")
 def ping():
-    return {"status": "ok"}
+    return {"message": "pong"}
 
 
 @app.get("/positions")
 def get_positions():
-    """Fetch current positions from Alpaca"""
-    url = f"{ALPACA_BASE_URL}/v2/positions"
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code != 200:
-        return {"error": r.json()}
-    return r.json()
+    """Возвращает список позиций из базы (пока фейковые данные)"""
+    db = SessionLocal()
+    positions = db.query(PositionSnapshot).all()
+    db.close()
+    return [
+        {
+            "ticker": p.ticker,
+            "qty": p.qty,
+            "avg_price": p.avg_price,
+            "market_price": p.market_price,
+            "market_value": p.market_value,
+            "ts": p.ts
+        }
+        for p in positions
+    ]
 
 
 @app.get("/report/daily")
 def get_daily_report():
-    """Return JSON summary: equity, PnL day/total, SPY comparison"""
-    account_url = f"{ALPACA_BASE_URL}/v2/account"
-    account = requests.get(account_url, headers=HEADERS).json()
-
-    spy_url = f"{ALPACA_DATA_URL}/stocks/SPY/quotes/latest"
-    spy = requests.get(spy_url, headers=HEADERS).json()
-
-    positions_url = f"{ALPACA_BASE_URL}/v2/positions"
-    positions = requests.get(positions_url, headers=HEADERS).json()
-
+    """JSON-отчёт с equity и PnL"""
+    db = SessionLocal()
+    last = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
+    db.close()
+    if not last:
+        return JSONResponse({"error": "No data"})
     return {
-        "date": datetime.utcnow().isoformat(),
-        "equity": account.get("equity"),
-        "cash": account.get("cash"),
-        "pnl_day": account.get("daytrading_buying_power"),
-        "pnl_total": account.get("unrealized_pl"),
-        "benchmark": {"ticker": "SPY", "last_price": spy.get("quote", {}).get("ap")},
-        "positions": positions,
+        "equity": last.equity,
+        "pnl_day": last.pnl_day,
+        "pnl_total": last.pnl_total,
+        "benchmark_value": last.benchmark_value,
+        "timestamp": last.ts
     }
 
 
 @app.get("/report/pdf")
 def get_pdf_report():
-    """Generate and return PDF report with positions"""
-    account_url = f"{ALPACA_BASE_URL}/v2/account"
-    account = requests.get(account_url, headers=HEADERS).json()
+    """Генерирует PDF отчёт"""
+    filename = "daily_report.pdf"
+    db = SessionLocal()
+    last = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
+    positions = db.query(PositionSnapshot).all()
+    db.close()
 
-    spy_url = f"{ALPACA_DATA_URL}/stocks/SPY/quotes/latest"
-    spy = requests.get(spy_url, headers=HEADERS).json()
-
-    positions_url = f"{ALPACA_BASE_URL}/v2/positions"
-    positions = requests.get(positions_url, headers=HEADERS).json()
-
-    filename = "/tmp/daily_report.pdf"
     c = canvas.Canvas(filename, pagesize=letter)
-    c.setFont("Helvetica", 12)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(100, 750, "AI Portfolio Bot — Daily Report")
 
-    # Header
-    c.drawString(50, 750, "AI Portfolio Bot — Daily Report")
-    c.drawString(50, 730, f"Date: {datetime.utcnow().isoformat()}")
-    c.drawString(50, 710, f"Equity: {account.get('equity')}")
-    c.drawString(50, 690, f"Cash: {account.get('cash')}")
-    c.drawString(50, 670, f"PnL Today: {account.get('daytrading_buying_power')}")
-    c.drawString(50, 650, f"PnL Total: {account.get('unrealized_pl')}")
-    c.drawString(50, 630, f"SPY Price: {spy.get('quote', {}).get('ap')}")
+    y = 700
+    if last:
+        c.setFont("Helvetica", 12)
+        c.drawString(100, y, f"Equity: {last.equity}")
+        y -= 20
+        c.drawString(100, y, f"PnL Day: {last.pnl_day}")
+        y -= 20
+        c.drawString(100, y, f"PnL Total: {last.pnl_total}")
+        y -= 20
+        c.drawString(100, y, f"SPY Benchmark: {last.benchmark_value}")
+        y -= 40
 
-    # Positions section
-    c.drawString(50, 600, "Open Positions:")
-    y = 580
-    if isinstance(positions, list):
-        for p in positions:
-            line = f"{p.get('symbol')} | Qty: {p.get('qty')} | Avg: {p.get('avg_entry_price')} | Market: {p.get('current_price')} | Value: {p.get('market_value')}"
-            c.drawString(50, y, line)
-            y -= 20
-            if y < 50:  # new page if not enough space
-                c.showPage()
-                c.setFont("Helvetica", 12)
-                y = 750
-    else:
-        c.drawString(50, 580, "No positions or error fetching positions.")
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(100, y, "Positions:")
+    y -= 20
 
-    c.showPage()
+    for p in positions:
+        c.setFont("Helvetica", 10)
+        c.drawString(100, y, f"{p.ticker} | Qty: {p.qty} | Avg: {p.avg_price} | Market: {p.market_price} | Value: {p.market_value}")
+        y -= 15
+        if y < 100:
+            c.showPage()
+            y = 700
+
     c.save()
-
     return FileResponse(filename, media_type="application/pdf", filename="daily_report.pdf")
