@@ -163,8 +163,10 @@ def seed_data():
     return {"status": "seeded"}
 
 
+
 # ---------------- AI RECOMMEND ----------------
-# ---------------- AI RECOMMEND ----------------
+from yahooquery import Ticker
+
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
     user_prompt = f"""
@@ -178,6 +180,7 @@ def ai_recommend(req: RecommendReq):
     Запрос пользователя: {req.prompt}
     """
 
+    # Запрос к OpenAI
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -188,29 +191,37 @@ def ai_recommend(req: RecommendReq):
         temperature=0.7,
     )
 
-  raw_answer = response.choices[0].message.content or ""
+    raw_answer = response.choices[0].message.content or ""
 
-# Убираем Markdown-обертку
-clean_answer = raw_answer.replace("```json", "").replace("```", "").strip()
+    # Убираем Markdown-обертку
+    clean_answer = raw_answer.replace("```json", "").replace("```", "").strip()
 
-parsed = {"tickers": [], "explanation": raw_answer}
-try:
-    start = clean_answer.find("{")
-    end = clean_answer.rfind("}")
-    if start != -1 and end != -1:
-        json_str = clean_answer[start:end+1]
-        parsed = json.loads(json_str)
-
-# Загружаем цены через yahooquery
-prices = {}
-for ticker in parsed.get("tickers", []):
+    parsed = {"tickers": [], "explanation": raw_answer}
     try:
-        t = Ticker(ticker)
-        quote = t.price.get(ticker)
-        if quote and "regularMarketPrice" in quote:
-            prices[ticker] = quote["regularMarketPrice"]
-        else:
-            prices[ticker] = None
+        start = clean_answer.find("{")
+        end = clean_answer.rfind("}")
+        if start != -1 and end != -1:
+            json_str = clean_answer[start:end+1]
+            parsed = json.loads(json_str)
     except Exception:
-        prices[ticker] = None
+        pass
 
+    # Загружаем цены через yahooquery
+    prices = {}
+    for ticker in parsed.get("tickers", []):
+        try:
+            t = Ticker(ticker)
+            quote = t.price.get(ticker)
+            if quote and "regularMarketPrice" in quote:
+                prices[ticker] = quote["regularMarketPrice"]
+            else:
+                prices[ticker] = None
+        except Exception:
+            prices[ticker] = None
+
+    return {
+        "strategy": req.strategy,
+        "tickers": parsed.get("tickers", []),
+        "explanation": parsed.get("explanation", ""),
+        "prices": prices
+    }
