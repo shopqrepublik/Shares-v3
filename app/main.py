@@ -179,7 +179,6 @@ def seed_data():
     db.close()
     return {"status": "seeded"}
 
-
 # ---------------- AI RECOMMEND ----------------
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
@@ -191,43 +190,36 @@ def ai_recommend(req: RecommendReq):
             "prices": {}
         }
 
-    user_prompt = f"""
-    Ты финансовый аналитик. Используя стратегию: {req.strategy},
-    предложи список из 3–5 тикеров акций и объяснение.
-    Верни СТРОГО JSON-объект вида:
-    {{
-      "tickers": ["AAPL","MSFT","NVDA"],
-      "explanation": "Краткое объяснение"
-    }}
-    Запрос пользователя: {req.prompt}
-    """
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON."},
+            {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
+        ],
+        response_format={ "type": "json_object" }   # ✅ просим сразу JSON
+    )
 
-   response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON."},
-        {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
-    ],
-    response_format={ "type": "json_object" }   # ✅ вот это ключ
-)
+    # получаем чистый JSON без обёрток
+    parsed = response.choices[0].message.parsed or {}
 
-  raw = response.choices[0].message.content or "{}"
-clean = raw.replace("```json", "").replace("```", "").strip()
+    tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
+    explanation = parsed.get("explanation", "")
 
-# Попробуем сразу распарсить
-parsed = {}
-try:
-    parsed = json.loads(clean)
-except:
-    # fallback: вырезаем между { }
-    start = clean.find("{")
-    end = clean.rfind("}")
-    if start != -1 and end != -1:
+    # загружаем цены по тикерам
+    prices = {}
+    for ticker in tickers:
         try:
-            parsed = json.loads(clean[start:end+1])
-        except Exception as e:
-            print("Ошибка парсинга JSON:", e)
+            data = yf.Ticker(ticker).history(period="5d")
+            if not data.empty:
+                prices[ticker] = round(data["Close"].iloc[-1], 2)
+        except Exception:
+            prices[ticker] = None
 
-tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
-explanation = parsed.get("explanation", clean)
+    return {
+        "strategy": req.strategy,
+        "tickers": tickers,
+        "explanation": explanation,
+        "prices": prices
+    }
+
 
