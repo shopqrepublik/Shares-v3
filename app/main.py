@@ -212,25 +212,23 @@ def ai_recommend(req: RecommendReq):
         temperature=0.7,
     )
 
-    raw = response.choices[0].message.content or "{}"
-    clean = raw.replace("```json", "").replace("```", "").strip()
+  raw = response.choices[0].message.content or "{}"
+clean = raw.replace("```json", "").replace("```", "").strip()
 
+# Попробуем сразу распарсить
+parsed = {}
+try:
+    parsed = json.loads(clean)
+except:
+    # fallback: вырезаем между { }
     start = clean.find("{")
     end = clean.rfind("}")
-    parsed = {}
     if start != -1 and end != -1:
         try:
             parsed = json.loads(clean[start:end+1])
         except Exception as e:
             print("Ошибка парсинга JSON:", e)
 
-    tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
-    explanation = parsed.get("explanation", clean)
+tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
+explanation = parsed.get("explanation", clean)
 
-    prices = fetch_many_last_close(tickers) if tickers else {}
-    return {
-        "strategy": req.strategy,
-        "tickers": tickers,
-        "explanation": explanation,
-        "prices": prices
-    }
