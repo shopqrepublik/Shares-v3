@@ -10,3 +10,4 @@ python-dotenv
 matplotlib
 openai>=1.0.0
 reportlab
+yfinance
