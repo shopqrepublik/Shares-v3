@@ -21,7 +21,7 @@ openai.api_key = OPENAI_API_KEY
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # FastAPI app
-app = FastAPI(title="AI Portfolio Bot", version="0.7")
+app = FastAPI(title="AI Portfolio Bot", version="0.8")
 
 
 # ---------------- SCHEMAS ----------------
@@ -123,4 +123,101 @@ def get_pdf_report():
         )
         y -= 15
         if y < 100:
-            c.showPage
+            c.showPage()
+            y = 700
+
+    c.save()
+    return FileResponse(filename, media_type="application/pdf", filename="daily_report.pdf")
+
+
+# ---------------- SEED TEST DATA ----------------
+@app.post("/seed")
+def seed_data():
+    db = SessionLocal()
+    db.add(PositionSnapshot(
+        ts=datetime.utcnow(),
+        ticker="AAPL",
+        qty=10,
+        avg_price=150.0,
+        market_price=155.0,
+        market_value=1550.0
+    ))
+    db.add(PositionSnapshot(
+        ts=datetime.utcnow(),
+        ticker="TSLA",
+        qty=5,
+        avg_price=700.0,
+        market_price=710.0,
+        market_value=3550.0
+    ))
+    db.add(MetricsDaily(
+        ts=datetime.utcnow(),
+        equity=10000.0,
+        pnl_day=200.0,
+        pnl_total=1200.0,
+        benchmark_value=400.0
+    ))
+    db.commit()
+    db.close()
+    return {"status": "seeded"}
+
+
+# ---------------- AI RECOMMEND ----------------
+@app.post("/ai/recommend")
+def ai_recommend(req: RecommendReq):
+    user_prompt = f"""
+    Ты финансовый аналитик. Используя стратегию: {req.strategy},
+    предложи список из 3–5 акций в формате JSON:
+    {{
+      "tickers": ["AAPL", "MSFT", "NVDA"],
+      "explanation": "Краткое объяснение стратегии и выбора"
+    }}
+    Ответ должен быть строго JSON-объектом!
+    Запрос пользователя: {req.prompt}
+    """
+
+    # Запрос к OpenAI
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты помощник по инвестициям."},
+            {"role": "user", "content": user_prompt}
+        ],
+        max_tokens=600,
+        temperature=0.7,
+    )
+
+    # Достаём сырой ответ
+    raw = response.choices[0].message.content[0].text
+
+    # Убираем ```json ... ```
+    clean = raw.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(clean)
+    except Exception as e:
+        print("Ошибка парсинга JSON:", e)
+        parsed = {"tickers": [], "explanation": raw}
+
+    tickers = parsed.get("tickers", [])
+    explanation = parsed.get("explanation", "")
+
+    # Подтягиваем цены через yfinance
+    prices = {}
+    for ticker in tickers:
+        try:
+            data = yf.Ticker(ticker).history(period="5d")
+            if not data.empty:
+                prices[ticker] = round(data["Close"].iloc[-1], 2)
+            else:
+                prices[ticker] = None
+        except Exception as e:
+            print(f"Ошибка загрузки цены {ticker}:", e)
+            prices[ticker] = None
+
+    return {
+        "strategy": req.strategy,
+        "tickers": tickers,
+        "explanation": explanation,
+        "prices": prices
+    }
