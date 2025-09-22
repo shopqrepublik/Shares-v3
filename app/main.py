@@ -170,17 +170,17 @@ import yfinance as yf
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
     user_prompt = f"""
-    Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
+    Ты финансовый аналитик. Используя стратегию: {req.strategy},
     предложи список из 3–5 акций в формате JSON:
     {{
       "tickers": ["AAPL", "MSFT", "NVDA"],
       "explanation": "Краткое объяснение стратегии и выбора"
     }}
-    Ответ должен быть строго в JSON!
+    Ответ должен быть строго JSON-объектом!
     Запрос пользователя: {req.prompt}
     """
 
-    # Запрос к OpenAI (строго JSON)
+    # Запрос к OpenAI с форматом JSON
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -189,14 +189,15 @@ def ai_recommend(req: RecommendReq):
         ],
         max_tokens=600,
         temperature=0.7,
-        response_format={"type": "json_object"}  # 👈 это важно
+        response_format={"type": "json_object"}  # 👈 ключевой момент
     )
 
+    # JSON уже чистый
     parsed = response.choices[0].message.parsed
     tickers = parsed.get("tickers", [])
     explanation = parsed.get("explanation", "")
 
-    # Подтягиваем цены через yfinance
+    # Подтягиваем цены через yfinance (последние 5 дней — берём последнее закрытие)
     prices = {}
     for ticker in tickers:
         try:
@@ -205,7 +206,8 @@ def ai_recommend(req: RecommendReq):
                 prices[ticker] = round(data["Close"].iloc[-1], 2)
             else:
                 prices[ticker] = None
-        except Exception:
+        except Exception as e:
+            print(f"Ошибка загрузки цены {ticker}:", e)
             prices[ticker] = None
 
     return {
@@ -214,3 +216,4 @@ def ai_recommend(req: RecommendReq):
         "explanation": explanation,
         "prices": prices
     }
+
