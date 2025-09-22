@@ -162,14 +162,19 @@ def seed_data():
 
 # ---------------- AI RECOMMEND ----------------
 from openai import OpenAI
+import os, json, yfinance as yf
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+app = FastAPI()
+
+class RecommendReq(BaseModel):
+    prompt: str
+    strategy: str
 
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
-    """
-    Получить рекомендации по акциям на основе стратегии и промта.
-    """
     if not os.getenv("OPENAI_API_KEY"):
         return {"error": "OPENAI_API_KEY not configured"}
 
@@ -207,13 +212,12 @@ def ai_recommend(req: RecommendReq):
             "prices": {}
         }
 
-    # Подгружаем котировки через yfinance
+    # Подгрузка котировок
     prices = {}
     for ticker in parsed.get("tickers", []):
         try:
             data = yf.Ticker(ticker).history(period="1d")
-            last_price = round(data["Close"].iloc[-1], 2)
-            prices[ticker] = last_price
+            prices[ticker] = round(data["Close"].iloc[-1], 2)
         except Exception:
             prices[ticker] = None
 
