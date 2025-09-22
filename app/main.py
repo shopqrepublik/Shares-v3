@@ -161,12 +161,16 @@ def seed_data():
 
 
 # ---------------- AI RECOMMEND ----------------
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
     """
     Получить рекомендации по акциям на основе стратегии и промта.
     """
-    if not OPENAI_API_KEY:
+    if not os.getenv("OPENAI_API_KEY"):
         return {"error": "OPENAI_API_KEY not configured"}
 
     user_prompt = f"""
@@ -181,7 +185,7 @@ def ai_recommend(req: RecommendReq):
     Запрос пользователя: {req.prompt}
     """
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "Ты помощник по инвестициям."},
@@ -191,7 +195,7 @@ def ai_recommend(req: RecommendReq):
         temperature=0.7,
     )
 
-    raw_answer = response["choices"][0]["message"]["content"]
+    raw_answer = response.choices[0].message.content
 
     try:
         parsed = json.loads(raw_answer)
