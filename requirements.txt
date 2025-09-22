@@ -10,3 +10,4 @@ python-dotenv==1.0.1
 matplotlib==3.9.2
 openai==1.43.0
 reportlab==4.2.2
+yahooquery==2.3.7
