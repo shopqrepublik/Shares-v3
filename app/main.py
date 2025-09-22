@@ -165,62 +165,48 @@ def seed_data():
 
 
 # ---------------- AI RECOMMEND ----------------
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockLatestQuoteRequest
-
-# Инициализируем клиента Alpaca для котировок
-alpaca_client = StockHistoricalDataClient(
-    os.getenv("ALPACA_API_KEY"),
-    os.getenv("ALPACA_SECRET_KEY")
-)
+import yfinance as yf
 
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
-    user_prompt = {
-        "role": "user",
-        "content": f"""
-        Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
-        предложи список из 3–5 акций в формате JSON:
-        {{
-          "tickers": ["AAPL", "MSFT", "NVDA"],
-          "explanation": "Краткое объяснение стратегии и выбора"
-        }}
-        Ответ должен быть строго JSON-объектом!
-        Запрос пользователя: {req.prompt}
-        """
-    }
+    user_prompt = f"""
+    Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
+    предложи список из 3–5 акций в формате JSON:
+    {{
+      "tickers": ["AAPL", "MSFT", "NVDA"],
+      "explanation": "Краткое объяснение стратегии и выбора"
+    }}
+    Ответ должен быть строго в JSON!
+    Запрос пользователя: {req.prompt}
+    """
 
-    # Запрос к OpenAI с форматом JSON
+    # Запрос к OpenAI (строго JSON)
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "Ты помощник по инвестициям."},
-            user_prompt
+            {"role": "user", "content": user_prompt}
         ],
         max_tokens=600,
         temperature=0.7,
-        response_format={"type": "json_object"}  # 👈 получаем чистый JSON
+        response_format={"type": "json_object"}  # 👈 это важно
     )
 
-    # Теперь у нас сразу готовый JSON
     parsed = response.choices[0].message.parsed
     tickers = parsed.get("tickers", [])
     explanation = parsed.get("explanation", "")
 
-    # Загружаем цены через Alpaca
+    # Подтягиваем цены через yfinance
     prices = {}
-    if tickers:
+    for ticker in tickers:
         try:
-            req_quotes = StockLatestQuoteRequest(symbol_or_symbols=tickers)
-            resp = alpaca_client.get_stock_latest_quote(req_quotes)
-            for t in tickers:
-                if t in resp:
-                    prices[t] = resp[t].ask_price or resp[t].bid_price
-                else:
-                    prices[t] = None
-        except Exception as e:
-            print("Ошибка получения котировок:", e)
-            prices = {t: None for t in tickers}
+            data = yf.Ticker(ticker).history(period="5d")
+            if not data.empty:
+                prices[ticker] = round(data["Close"].iloc[-1], 2)
+            else:
+                prices[ticker] = None
+        except Exception:
+            prices[ticker] = None
 
     return {
         "strategy": req.strategy,
