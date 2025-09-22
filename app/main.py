@@ -188,23 +188,18 @@ def ai_recommend(req: RecommendReq):
         temperature=0.7,
     )
 
-    raw_answer = response.choices[0].message.content or ""
+  raw_answer = response.choices[0].message.content or ""
 
-    # Ищем JSON между первой { и последней }
-    parsed = {"tickers": [], "explanation": raw_answer}
-    try:
-        start = raw_answer.find("{")
-        end = raw_answer.rfind("}")
-        if start != -1 and end != -1:
-            json_str = raw_answer[start:end+1]
-            parsed = json.loads(json_str)
-    except Exception:
-        return {
-            "strategy": req.strategy,
-            "tickers": [],
-            "explanation": raw_answer,
-            "prices": {}
-        }
+# Убираем Markdown-обертку
+clean_answer = raw_answer.replace("```json", "").replace("```", "").strip()
+
+parsed = {"tickers": [], "explanation": raw_answer}
+try:
+    start = clean_answer.find("{")
+    end = clean_answer.rfind("}")
+    if start != -1 and end != -1:
+        json_str = clean_answer[start:end+1]
+        parsed = json.loads(json_str)
 
 # Загружаем цены через yahooquery
 prices = {}
