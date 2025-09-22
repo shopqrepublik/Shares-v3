@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+yfinance
+alpaca-py
+sqlalchemy
+python-dotenv
+matplotlib
+openai
