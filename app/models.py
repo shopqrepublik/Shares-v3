@@ -1,5 +1,5 @@
 from __future__ import annotations
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import os
