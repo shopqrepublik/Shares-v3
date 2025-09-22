@@ -7,6 +7,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import os
 import json
+import yfinance as yf   # ✅ вынес наверх
 
 from openai import OpenAI
 from app.models import (
@@ -24,7 +25,6 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI(title="AI Portfolio Bot", version="1.0")
 
-
 # ---------------- SCHEMAS ----------------
 class OnboardReq(BaseModel):
     budget: float
@@ -40,15 +40,13 @@ class BuildReq(BaseModel):
     tickers: list[str]
     weights: list[float] | None = None
 
-
 # ---------------- HEALTH ----------------
-@app.get("/ping")
+@app.get("/ping", tags=["health"])
 def ping():
     return {"message": "pong"}
 
-
 # ---------------- ONBOARD ----------------
-@app.post("/onboard")
+@app.post("/onboard", tags=["portfolio"])
 def onboard(req: OnboardReq):
     db = SessionLocal()
     pref = db.query(UserPref).first()
@@ -67,9 +65,8 @@ def onboard(req: OnboardReq):
         "budget": pref.budget, "goal": pref.goal, "risk": pref.risk, "horizon_years": pref.horizon_years
     }}
 
-
 # ---------------- POSITIONS ----------------
-@app.get("/positions")
+@app.get("/positions", tags=["portfolio"])
 def get_positions():
     db = SessionLocal()
     positions = db.query(PositionSnapshot).all()
@@ -86,9 +83,8 @@ def get_positions():
         for p in positions
     ]
 
-
 # ---------------- REPORT (JSON) ----------------
-@app.get("/report/daily")
+@app.get("/report/daily", tags=["reports"])
 def get_daily_report():
     db = SessionLocal()
     last = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
@@ -116,9 +112,8 @@ def get_daily_report():
         ],
     }
 
-
 # ---------------- REPORT (PDF) ----------------
-@app.get("/report/pdf")
+@app.get("/report/pdf", tags=["reports"])
 def get_pdf_report():
     filename = "daily_report.pdf"
     db = SessionLocal()
@@ -133,25 +128,19 @@ def get_pdf_report():
     y = 700
     if last:
         c.setFont("Helvetica", 12)
-        c.drawString(100, y, f"Equity: {last.equity}")
-        y -= 20
-        c.drawString(100, y, f"PnL Day: {last.pnl_day}")
-        y -= 20
-        c.drawString(100, y, f"PnL Total: {last.pnl_total}")
-        y -= 20
-        c.drawString(100, y, f"SPY Benchmark: {last.benchmark_value}")
-        y -= 40
+        c.drawString(100, y, f"Equity: {last.equity}"); y -= 20
+        c.drawString(100, y, f"PnL Day: {last.pnl_day}"); y -= 20
+        c.drawString(100, y, f"PnL Total: {last.pnl_total}"); y -= 20
+        c.drawString(100, y, f"SPY Benchmark: {last.benchmark_value}"); y -= 40
 
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(100, y, "Positions:")
-    y -= 20
+    c.drawString(100, y, "Positions:"); y -= 20
 
     for p in positions:
         c.setFont("Helvetica", 10)
         c.drawString(
-            100,
-            y,
-            f"{p.ticker} | Qty: {p.qty} | Avg: {p.avg_price} | Market: {p.market_price} | Value: {p.market_value}",
+            100, y,
+            f"{p.ticker} | Qty: {p.qty} | Avg: {p.avg_price} | Market: {p.market_price} | Value: {p.market_value}"
         )
         y -= 15
         if y < 100:
@@ -161,9 +150,8 @@ def get_pdf_report():
     c.save()
     return FileResponse(filename, media_type="application/pdf", filename="daily_report.pdf")
 
-
 # ---------------- SEED TEST DATA ----------------
-@app.post("/seed")
+@app.post("/seed", tags=["debug"])
 def seed_data():
     db = SessionLocal()
     db.add(PositionSnapshot(
@@ -173,14 +161,15 @@ def seed_data():
         ts=datetime.utcnow(), ticker="TSLA", qty=5, avg_price=700.0, market_price=710.0, market_value=3550.0
     ))
     db.add(MetricsDaily(
-        ts=datetime.utcnow(), equity=10000.0, pnl_day=200.0, pnl_total=1200.0, benchmark_value=fetch_spy_last_close() or 400.0
+        ts=datetime.utcnow(), equity=10000.0, pnl_day=200.0, pnl_total=1200.0,
+        benchmark_value=fetch_spy_last_close() or 400.0
     ))
     db.commit()
     db.close()
     return {"status": "seeded"}
 
 # ---------------- AI RECOMMEND ----------------
-@app.post("/ai/recommend")
+@app.post("/ai/recommend", tags=["ai"])
 def ai_recommend(req: RecommendReq):
     if not client:
         return {
@@ -191,20 +180,18 @@ def ai_recommend(req: RecommendReq):
         }
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  # можно заменить на gpt-4o или gpt-4.1 для продакшена
+        model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON с полями: tickers (список тикеров) и explanation (объяснение)."},
+            {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON с полями: tickers и explanation."},
             {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
         ],
-        response_format={"type": "json_object"}   # просим строго JSON
+        response_format={"type": "json_object"}
     )
 
     parsed = {}
-    # ✅ пробуем взять .parsed (новый клиент openai>=1.43.0)
     try:
         parsed = response.choices[0].message.parsed
     except AttributeError:
-        # fallback: чистим .content от markdown и парсим вручную
         raw = response.choices[0].message.content or "{}"
         clean = raw.replace("```json", "").replace("```", "").strip()
         try:
@@ -216,7 +203,6 @@ def ai_recommend(req: RecommendReq):
     tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
     explanation = parsed.get("explanation", "")
 
-    # Загружаем цены через yfinance
     prices = {}
     for ticker in tickers:
         try:
@@ -236,41 +222,39 @@ def ai_recommend(req: RecommendReq):
     }
 
 # ---------------- DEBUG CONNECTIONS ----------------
-@app.get("/debug/connections")
+@app.get("/debug/connections", tags=["debug"])
 def debug_connections():
     results = {}
 
-    # 1. Проверяем OpenAI
+    # OpenAI
     try:
         if not client:
-            results["openai"] = "❌ API key not configured"
+            results["openai"] = {"ok": False, "msg": "API key not configured"}
         else:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": "ping"}],
-                response_format={"type": "json_object"}
+                messages=[{"role": "user", "content": "ping"}]
             )
-            # пробуем взять ответ
-            try:
-                parsed = resp.choices[0].message.parsed
-                results["openai"] = f"✅ OK (parsed JSON: {parsed})"
-            except AttributeError:
-                raw = resp.choices[0].message.content
-                results["openai"] = f"⚠️ fallback content: {raw[:100]}..."
+            parsed = getattr(resp.choices[0].message, "parsed", None)
+            content = getattr(resp.choices[0].message, "content", None)
+            if parsed:
+                results["openai"] = {"ok": True, "mode": "parsed", "sample": parsed}
+            elif content:
+                results["openai"] = {"ok": True, "mode": "content", "sample": content[:80]}
+            else:
+                results["openai"] = {"ok": False, "msg": "empty response"}
     except Exception as e:
-        results["openai"] = f"❌ error: {str(e)}"
+        results["openai"] = {"ok": False, "error": str(e)}
 
-    # 2. Проверяем yfinance (AAPL)
+    # yfinance
     try:
-        import yfinance as yf
         data = yf.Ticker("AAPL").history(period="5d")
         if not data.empty:
-            last_price = round(data["Close"].iloc[-1], 2)
-            results["yfinance"] = f"✅ OK (AAPL last close: {last_price})"
+            last_price = float(round(data["Close"].iloc[-1], 2))
+            results["yfinance"] = {"ok": True, "AAPL_last_close": last_price}
         else:
-            results["yfinance"] = "⚠️ empty response for AAPL"
+            results["yfinance"] = {"ok": False, "msg": "empty dataframe"}
     except Exception as e:
-        results["yfinance"] = f"❌ error: {str(e)}"
+        results["yfinance"] = {"ok": False, "error": str(e)}
 
     return results
-
