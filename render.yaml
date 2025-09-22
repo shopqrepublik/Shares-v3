@@ -7,12 +7,6 @@ services:
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port 10000"
     healthCheckPath: /ping
     envVars:
-      - key: ALPACA_API_KEY
-        sync: false
-      - key: ALPACA_SECRET_KEY
-        sync: false
-      - key: ALPACA_BASE_URL
-        value: https://paper-api.alpaca.markets
       - key: OPENAI_API_KEY
         sync: false
       - key: DATABASE_URL
