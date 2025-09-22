@@ -202,15 +202,14 @@ def ai_recommend(req: RecommendReq):
     Запрос пользователя: {req.prompt}
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Ты помощник по инвестициям. Это учебный симулятор."},
-            {"role": "user", "content": user_prompt}
-        ],
-        max_tokens=600,
-        temperature=0.7,
-    )
+   response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON."},
+        {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
+    ],
+    response_format={ "type": "json_object" }   # ✅ вот это ключ
+)
 
   raw = response.choices[0].message.content or "{}"
 clean = raw.replace("```json", "").replace("```", "").strip()
