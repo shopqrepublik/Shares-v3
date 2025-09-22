@@ -11,6 +11,18 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import mplfinance as mpf
 
+# 👇 Добавь сюда сразу после импортов
+print("PORT from env:", os.getenv("PORT"))
+
+from openai import OpenAI
+from app.models import (
+    init_db, SessionLocal,
+    PositionSnapshot, MetricsDaily,
+    UserPref
+)
+from app.utils import fetch_spy_last_close
+
+
 from openai import OpenAI
 from app.models import (
     init_db, SessionLocal,
