@@ -7,15 +7,15 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import os
 import json
-import yfinance as yf   # ✅ вынес наверх
+import yfinance as yf
 
 from openai import OpenAI
 from app.models import (
     init_db, SessionLocal,
     PositionSnapshot, MetricsDaily,
-    UserPref, PortfolioHolding
+    UserPref
 )
-from app.utils import fetch_many_last_close, fetch_spy_last_close
+from app.utils import fetch_spy_last_close
 
 # ---------------- INIT ----------------
 init_db()
@@ -35,10 +35,6 @@ class OnboardReq(BaseModel):
 class RecommendReq(BaseModel):
     prompt: str
     strategy: str
-
-class BuildReq(BaseModel):
-    tickers: list[str]
-    weights: list[float] | None = None
 
 # ---------------- HEALTH ----------------
 @app.get("/ping", tags=["health"])
@@ -182,17 +178,18 @@ def ai_recommend(req: RecommendReq):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Ты — финансовый аналитик. Верни только JSON с полями: tickers и explanation."},
+            {"role": "system", "content": "Ты — финансовый аналитик. Верни JSON с полями: tickers (список тикеров) и explanation (объяснение)."},
             {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
         ],
         response_format={"type": "json_object"}
     )
 
     parsed = {}
-    try:
-        parsed = response.choices[0].message.parsed
-    except AttributeError:
-        raw = response.choices[0].message.content or "{}"
+    msg = response.choices[0].message
+    if hasattr(msg, "parsed") and msg.parsed:
+        parsed = msg.parsed
+    else:
+        raw = msg.content or "{}"
         clean = raw.replace("```json", "").replace("```", "").strip()
         try:
             parsed = json.loads(clean)
@@ -226,14 +223,15 @@ def ai_recommend(req: RecommendReq):
 def debug_connections():
     results = {}
 
-    # OpenAI
+    # OpenAI check
     try:
         if not client:
             results["openai"] = {"ok": False, "msg": "API key not configured"}
         else:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": "ping"}]
+                messages=[{"role": "user", "content": "ping"}],
+                response_format={"type": "json_object"}
             )
             parsed = getattr(resp.choices[0].message, "parsed", None)
             content = getattr(resp.choices[0].message, "content", None)
@@ -246,7 +244,7 @@ def debug_connections():
     except Exception as e:
         results["openai"] = {"ok": False, "error": str(e)}
 
-    # yfinance
+    # yfinance check
     try:
         data = yf.Ticker("AAPL").history(period="5d")
         if not data.empty:
@@ -258,3 +256,4 @@ def debug_connections():
         results["yfinance"] = {"ok": False, "error": str(e)}
 
     return results
+
