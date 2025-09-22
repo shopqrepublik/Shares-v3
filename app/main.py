@@ -164,6 +164,7 @@ def seed_data():
 
 
 # ---------------- AI RECOMMEND ----------------
+# ---------------- AI RECOMMEND ----------------
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
     user_prompt = f"""
@@ -189,18 +190,14 @@ def ai_recommend(req: RecommendReq):
 
     raw_answer = response.choices[0].message.content or ""
 
-    # Чистим Markdown-обёртку
-    clean_answer = raw_answer.strip()
-    clean_answer = re.sub(r"^```json", "", clean_answer, flags=re.MULTILINE)
-    clean_answer = re.sub(r"^```", "", clean_answer, flags=re.MULTILINE)
-    clean_answer = re.sub(r"```$", "", clean_answer, flags=re.MULTILINE).strip()
-
+    # Ищем JSON между первой { и последней }
     parsed = {"tickers": [], "explanation": raw_answer}
     try:
-        # Ищем JSON между первой { и последней }
-        match = re.search(r"\{.*\}", clean_answer, flags=re.DOTALL)
-        if match:
-            parsed = json.loads(match.group(0))
+        start = raw_answer.find("{")
+        end = raw_answer.rfind("}")
+        if start != -1 and end != -1:
+            json_str = raw_answer[start:end+1]
+            parsed = json.loads(json_str)
     except Exception:
         return {
             "strategy": req.strategy,
@@ -227,3 +224,4 @@ def ai_recommend(req: RecommendReq):
         "explanation": parsed.get("explanation", ""),
         "prices": prices
     }
+
