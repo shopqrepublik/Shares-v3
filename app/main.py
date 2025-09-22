@@ -6,7 +6,7 @@ from typing import List
 
 from alpaca.trading.client import TradingClient
 
-from .guardrails import rebalance_with_guardrails, RailConfig
+from app.guardrails import rebalance_with_guardrails, RailConfig
 from .models import init_db
 from .reporting import snapshot_positions, log_daily_metrics
 
