@@ -1,25 +1,33 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-import yfinance as yf
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from typing import List
 
-# Load env variables
+from alpaca.trading.client import TradingClient
+
+from .guardrails import rebalance_with_guardrails, RailConfig
+from .models import init_db
+from .reporting import snapshot_positions, log_daily_metrics
+
+# Load env
 load_dotenv()
 
-app = FastAPI(title="AI Portfolio Bot")
+app = FastAPI(title="AI Portfolio Bot", version="1.2.0")
 
-# Alpaca config
+# DB init
+init_db()
+
+# Alpaca client
 ALPACA_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_BASE = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+BENCHMARK = os.getenv("BENCHMARK", "SPY")
 
 trading = None
 if ALPACA_KEY and ALPACA_SECRET:
     trading = TradingClient(ALPACA_KEY, ALPACA_SECRET, paper="paper" in ALPACA_BASE)
+
 
 # ===== Root & healthcheck =====
 @app.get("/")
@@ -29,6 +37,7 @@ def root():
 @app.get("/ping")
 def ping():
     return {"status": "ok"}
+
 
 # ===== Models =====
 class OnboardReq(BaseModel):
@@ -42,7 +51,8 @@ class AllocationItem(BaseModel):
     target_weight: float
 
 class Proposal(BaseModel):
-    allocations: list[AllocationItem]
+    allocations: List[AllocationItem]
+
 
 # ===== Endpoints =====
 @app.post("/onboard")
@@ -59,12 +69,13 @@ def onboard(req: OnboardReq):
     s = sum(w for _, w in alloc)
     alloc = [(t, w / s) for t, w in alloc]
 
-    return Proposal(
-        allocations=[AllocationItem(ticker=t, target_weight=w) for t, w in alloc]
-    )
+    return Proposal(allocations=[AllocationItem(ticker=t, target_weight=w) for t, w in alloc])
+
 
 @app.get("/price/{ticker}")
 def price(ticker: str):
+    # ⚠️ пока ещё yfinance; позже заменим Alpaca Market Data
+    import yfinance as yf
     info = yf.Ticker(ticker)
     hist = info.history(period="1mo")
     if hist.empty:
@@ -72,28 +83,59 @@ def price(ticker: str):
     last = float(hist["Close"].iloc[-1])
     return {"ticker": ticker, "last": last}
 
+
 @app.post("/rebalance")
-def rebalance(p: Proposal, budget: float):
-    orders = []
-    for item in p.allocations:
-        hist = yf.Ticker(item.ticker).history(period="5d")
-        if hist.empty:
-            continue
-        last = float(hist["Close"].iloc[-1])
-        target_value = budget * item.target_weight
-        qty = int(target_value // last)
-        if qty <= 0:
-            continue
+def rebalance(p: Proposal, budget: float = Query(..., gt=0), submit: bool = Query(False)):
+    if trading is None:
+        return {"ok": False, "errors": ["Trading client is not configured (missing API keys)."], "preview": {}}
+    allocations = [dict(ticker=a.ticker, target_weight=a.target_weight) for a in p.allocations]
+    result = rebalance_with_guardrails(trading, allocations, budget, submit, RailConfig())
+    try:
+        snapshot_positions(trading)
+        log_daily_metrics(trading, BENCHMARK)
+    except Exception:
+        pass
+    return result
 
-        req = MarketOrderRequest(
-            symbol=item.ticker,
-            qty=qty,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-        )
-        # Uncomment to enable real trading (after guardrails)
-        # order = trading.submit_order(req)
 
-        orders.append({"ticker": item.ticker, "qty": qty, "est_cost": qty * last})
+@app.get("/positions")
+def positions():
+    """Текущие позиции в Alpaca"""
+    if trading is None:
+        raise HTTPException(400, "Trading client not configured")
+    pos = trading.get_all_positions()
+    return [
+        {
+            "ticker": p.symbol,
+            "qty": float(p.qty),
+            "avg_price": float(p.avg_entry_price),
+            "market_price": float(p.current_price),
+            "market_value": float(p.market_value),
+            "unrealized_pl": float(p.unrealized_pl),
+        }
+        for p in pos
+    ]
 
-    return {"preview": orders, "note": "Validate with guardrails before submit_order"}
+
+@app.get("/report/daily")
+def daily_report():
+    """Сводка: equity, PnL, сравнение с бенчмарком"""
+    if trading is None:
+        raise HTTPException(400, "Trading client not configured")
+    acct = trading.get_account()
+    equity = float(acct.equity)
+    cash = float(acct.cash)
+    pnl_day = float(acct.equity) - float(acct.last_equity)
+
+    # Benchmark (SPY) через yfinance; позже заменим Alpaca Market Data
+    import yfinance as yf
+    bm = yf.Ticker(BENCHMARK).history(period="ytd")["Close"].pct_change().add(1).cumprod()
+    bm_return = (bm.iloc[-1] - 1) * 100 if not bm.empty else 0.0
+
+    return {
+        "equity": equity,
+        "cash": cash,
+        "pnl_day": pnl_day,
+        "benchmark": BENCHMARK,
+        "benchmark_ytd_return_pct": bm_return,
+    }
