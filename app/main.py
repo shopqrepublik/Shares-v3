@@ -5,9 +5,11 @@ from pydantic import BaseModel
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-import os
-import json
+import os, json, io, base64
 import yfinance as yf
+import numpy as np
+from sklearn.linear_model import LinearRegression
+import mplfinance as mpf
 
 from openai import OpenAI
 from app.models import (
@@ -23,13 +25,13 @@ init_db()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-app = FastAPI(title="AI Portfolio Bot", version="1.0")
+app = FastAPI(title="AI Portfolio Bot", version="1.1")
 
 # ---------------- SCHEMAS ----------------
 class OnboardReq(BaseModel):
     budget: float
-    goal: str           # growth / income / balanced
-    risk: str           # low / medium / high
+    goal: str
+    risk: str
     horizon_years: int
 
 class RecommendReq(BaseModel):
@@ -58,7 +60,8 @@ def onboard(req: OnboardReq):
     db.refresh(pref)
     db.close()
     return {"status": "ok", "pref": {
-        "budget": pref.budget, "goal": pref.goal, "risk": pref.risk, "horizon_years": pref.horizon_years
+        "budget": pref.budget, "goal": pref.goal,
+        "risk": pref.risk, "horizon_years": pref.horizon_years
     }}
 
 # ---------------- POSITIONS ----------------
@@ -136,7 +139,8 @@ def get_pdf_report():
         c.setFont("Helvetica", 10)
         c.drawString(
             100, y,
-            f"{p.ticker} | Qty: {p.qty} | Avg: {p.avg_price} | Market: {p.market_price} | Value: {p.market_value}"
+            f"{p.ticker} | Qty: {p.qty} | Avg: {p.avg_price} "
+            f"| Market: {p.market_price} | Value: {p.market_value}"
         )
         y -= 15
         if y < 100:
@@ -151,10 +155,12 @@ def get_pdf_report():
 def seed_data():
     db = SessionLocal()
     db.add(PositionSnapshot(
-        ts=datetime.utcnow(), ticker="AAPL", qty=10, avg_price=150.0, market_price=155.0, market_value=1550.0
+        ts=datetime.utcnow(), ticker="AAPL", qty=10,
+        avg_price=150.0, market_price=155.0, market_value=1550.0
     ))
     db.add(PositionSnapshot(
-        ts=datetime.utcnow(), ticker="TSLA", qty=5, avg_price=700.0, market_price=710.0, market_value=3550.0
+        ts=datetime.utcnow(), ticker="TSLA", qty=5,
+        avg_price=700.0, market_price=710.0, market_value=3550.0
     ))
     db.add(MetricsDaily(
         ts=datetime.utcnow(), equity=10000.0, pnl_day=200.0, pnl_total=1200.0,
@@ -217,6 +223,57 @@ def ai_recommend(req: RecommendReq):
         "explanation": explanation,
         "prices": prices
     }
+
+# ---------------- AI TECHNICAL ANALYSIS ----------------
+@app.post("/ai/technical", tags=["ai"])
+def technical_analysis(ticker: str = "AAPL", period: str = "6mo", interval: str = "1d", forecast_days: int = 14):
+    try:
+        # 1. Загружаем данные
+        data = yf.download(ticker, period=period, interval=interval)
+        if data.empty:
+            return {"error": f"Нет данных для {ticker}"}
+
+        # 2. Строим свечной график
+        buf = io.BytesIO()
+        mpf.plot(data, type="candle", mav=(5,20), volume=True, style="yahoo", savefig=buf)
+        buf.seek(0)
+        img_bytes = buf.read()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        # 3. Прогноз цен (линейная регрессия)
+        y = data["Close"].values
+        X = np.arange(len(y)).reshape(-1, 1)
+        model = LinearRegression().fit(X, y)
+        future = np.arange(len(y), len(y) + forecast_days).reshape(-1, 1)
+        forecast = model.predict(future).tolist()
+
+        # 4. AI-анализ
+        ai_analysis = "AI отключен"
+        if client:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Ты — эксперт по техническому анализу акций."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": f"Это свечной график {ticker} за период {period}. Проанализируй тренд, паттерны и сделай прогноз на {forecast_days} дней."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                    ]}
+                ]
+            )
+            ai_analysis = resp.choices[0].message.content
+
+        return {
+            "ticker": ticker,
+            "period": period,
+            "interval": interval,
+            "forecast_days": forecast_days,
+            "ai_analysis": ai_analysis,
+            "forecast_prices": forecast,
+            "chart_base64": img_b64
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
 
 # ---------------- DEBUG CONNECTIONS ----------------
 @app.get("/debug/connections", tags=["debug"])
