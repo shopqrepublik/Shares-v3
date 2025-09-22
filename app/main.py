@@ -224,4 +224,3 @@ def ai_recommend(req: RecommendReq):
         "explanation": parsed.get("explanation", ""),
         "prices": prices
     }
-
