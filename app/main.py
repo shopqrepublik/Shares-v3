@@ -9,6 +9,8 @@ import os
 import openai
 import yfinance as yf
 import json
+import re
+from openai import OpenAI
 
 # ---------------- INIT ----------------
 # DB init
@@ -17,9 +19,10 @@ init_db()
 # OpenAI init
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # FastAPI app
-app = FastAPI(title="AI Portfolio Bot", version="0.6")
+app = FastAPI(title="AI Portfolio Bot", version="0.7")
 
 
 # ---------------- SCHEMAS ----------------
@@ -161,19 +164,6 @@ def seed_data():
 
 
 # ---------------- AI RECOMMEND ----------------
-import os, json, re
-import yfinance as yf
-from fastapi import FastAPI
-from pydantic import BaseModel
-from openai import OpenAI
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-app = FastAPI()
-
-class RecommendReq(BaseModel):
-    prompt: str
-    strategy: str
-
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
     user_prompt = f"""
@@ -197,10 +187,13 @@ def ai_recommend(req: RecommendReq):
         temperature=0.7,
     )
 
-    raw_answer = response.choices[0].message.content
+    raw_answer = response.choices[0].message.content or ""
 
-    # Убираем Markdown-обёртку
-    clean_answer = re.sub(r"^```json|```$", "", raw_answer, flags=re.MULTILINE).strip()
+    # Чистим Markdown-обёртку
+    clean_answer = raw_answer.strip()
+    clean_answer = re.sub(r"^```json", "", clean_answer, flags=re.MULTILINE)
+    clean_answer = re.sub(r"^```", "", clean_answer, flags=re.MULTILINE)
+    clean_answer = re.sub(r"```$", "", clean_answer, flags=re.MULTILINE).strip()
 
     try:
         parsed = json.loads(clean_answer)
@@ -212,11 +205,11 @@ def ai_recommend(req: RecommendReq):
             "prices": {}
         }
 
-    # Загружаем цены
+    # Загружаем цены с period=5d
     prices = {}
     for ticker in parsed.get("tickers", []):
         try:
-            data = yf.Ticker(ticker).history(period="1d")
+            data = yf.Ticker(ticker).history(period="5d")
             if not data.empty:
                 prices[ticker] = round(data["Close"].iloc[-1], 2)
             else:
