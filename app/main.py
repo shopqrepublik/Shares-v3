@@ -165,63 +165,66 @@ def seed_data():
 
 
 # ---------------- AI RECOMMEND ----------------
-from yahooquery import Ticker
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest
+
+# Инициализируем клиента Alpaca для котировок
+alpaca_client = StockHistoricalDataClient(
+    os.getenv("ALPACA_API_KEY"),
+    os.getenv("ALPACA_SECRET_KEY")
+)
 
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
-    user_prompt = f"""
-    Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
-    предложи список из 3–5 акций в формате JSON:
-    {{
-      "tickers": ["AAPL", "MSFT", "NVDA"],
-      "explanation": "Краткое объяснение стратегии и выбора"
-    }}
-    Ответ должен быть строго в JSON!
-    Запрос пользователя: {req.prompt}
-    """
+    user_prompt = {
+        "role": "user",
+        "content": f"""
+        Ты финансовый аналитик. Используя стратегию: {req.strategy}, 
+        предложи список из 3–5 акций в формате JSON:
+        {{
+          "tickers": ["AAPL", "MSFT", "NVDA"],
+          "explanation": "Краткое объяснение стратегии и выбора"
+        }}
+        Ответ должен быть строго JSON-объектом!
+        Запрос пользователя: {req.prompt}
+        """
+    }
 
-    # Запрос к OpenAI
+    # Запрос к OpenAI с форматом JSON
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "Ты помощник по инвестициям."},
-            {"role": "user", "content": user_prompt}
+            user_prompt
         ],
         max_tokens=600,
         temperature=0.7,
+        response_format={"type": "json_object"}  # 👈 получаем чистый JSON
     )
 
-    raw_answer = response.choices[0].message.content or ""
+    # Теперь у нас сразу готовый JSON
+    parsed = response.choices[0].message.parsed
+    tickers = parsed.get("tickers", [])
+    explanation = parsed.get("explanation", "")
 
-    # Убираем Markdown-обертку
-    clean_answer = raw_answer.replace("```json", "").replace("```", "").strip()
-
-    parsed = {"tickers": [], "explanation": raw_answer}
-    try:
-        start = clean_answer.find("{")
-        end = clean_answer.rfind("}")
-        if start != -1 and end != -1:
-            json_str = clean_answer[start:end+1]
-            parsed = json.loads(json_str)
-    except Exception:
-        pass
-
-    # Загружаем цены через yahooquery
+    # Загружаем цены через Alpaca
     prices = {}
-    for ticker in parsed.get("tickers", []):
+    if tickers:
         try:
-            t = Ticker(ticker)
-            quote = t.price.get(ticker)
-            if quote and "regularMarketPrice" in quote:
-                prices[ticker] = quote["regularMarketPrice"]
-            else:
-                prices[ticker] = None
-        except Exception:
-            prices[ticker] = None
+            req_quotes = StockLatestQuoteRequest(symbol_or_symbols=tickers)
+            resp = alpaca_client.get_stock_latest_quote(req_quotes)
+            for t in tickers:
+                if t in resp:
+                    prices[t] = resp[t].ask_price or resp[t].bid_price
+                else:
+                    prices[t] = None
+        except Exception as e:
+            print("Ошибка получения котировок:", e)
+            prices = {t: None for t in tickers}
 
     return {
         "strategy": req.strategy,
-        "tickers": parsed.get("tickers", []),
-        "explanation": parsed.get("explanation", ""),
+        "tickers": tickers,
+        "explanation": explanation,
         "prices": prices
     }
