@@ -38,7 +38,7 @@ class RecommendReq(BaseModel):
 
 class BuildReq(BaseModel):
     tickers: list[str]
-    weights: list[float] | None = None  # если None — равные доли
+    weights: list[float] | None = None
 
 
 # ---------------- HEALTH ----------------
@@ -51,7 +51,6 @@ def ping():
 @app.post("/onboard")
 def onboard(req: OnboardReq):
     db = SessionLocal()
-    # Сохраняем единственную запись настроек (простая модель)
     pref = db.query(UserPref).first()
     if pref is None:
         pref = UserPref()
@@ -69,7 +68,7 @@ def onboard(req: OnboardReq):
     }}
 
 
-# ---------------- POSITIONS (исторические снимки для отчётов) ----------------
+# ---------------- POSITIONS ----------------
 @app.get("/positions")
 def get_positions():
     db = SessionLocal()
@@ -163,7 +162,7 @@ def get_pdf_report():
     return FileResponse(filename, media_type="application/pdf", filename="daily_report.pdf")
 
 
-# ---------------- SEED TEST DATA (для /report/*) ----------------
+# ---------------- SEED TEST DATA ----------------
 @app.post("/seed")
 def seed_data():
     db = SessionLocal()
@@ -184,26 +183,21 @@ def seed_data():
 # ---------------- AI RECOMMEND ----------------
 @app.post("/ai/recommend")
 def ai_recommend(req: RecommendReq):
-    """
-    1) Просим LLM выдать строгий JSON (tickers[], explanation)
-    2) Подтягиваем цены (yfinance; если не выйдет — вернём None по тикеру)
-    """
     if not client:
-        # сервис всё равно отвечает — просто без LLM
         return {
             "strategy": req.strategy,
             "tickers": [],
-            "explanation": "OpenAI API key not configured on server",
+            "explanation": "OpenAI API key not configured",
             "prices": {}
         }
 
     user_prompt = f"""
     Ты финансовый аналитик. Используя стратегию: {req.strategy},
-    предложи список из 3–5 тикеров акций (только тикеры без лишнего текста) и объяснение.
+    предложи список из 3–5 тикеров акций и объяснение.
     Верни СТРОГО JSON-объект вида:
     {{
       "tickers": ["AAPL","MSFT","NVDA"],
-      "explanation": "Краткое объяснение выбора и как стратегия применена"
+      "explanation": "Краткое объяснение"
     }}
     Запрос пользователя: {req.prompt}
     """
@@ -211,22 +205,27 @@ def ai_recommend(req: RecommendReq):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Ты помощник по инвестициям. Не даёшь инвестиционных советов; это учебный симулятор."},
+            {"role": "system", "content": "Ты помощник по инвестициям. Это учебный симулятор."},
             {"role": "user", "content": user_prompt}
         ],
         max_tokens=600,
         temperature=0.7,
-        response_format={"type": "json_object"},
     )
 
-    # API v1 с response_format даёт готовый JSON-текст в message.content
     raw = response.choices[0].message.content or "{}"
-    try:
-        parsed = json.loads(raw)
-        tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
-        explanation = parsed.get("explanation", "")
-    except Exception:
-        tickers, explanation = [], raw
+    clean = raw.replace("```json", "").replace("```", "").strip()
+
+    start = clean.find("{")
+    end = clean.rfind("}")
+    parsed = {}
+    if start != -1 and end != -1:
+        try:
+            parsed = json.loads(clean[start:end+1])
+        except Exception as e:
+            print("Ошибка парсинга JSON:", e)
+
+    tickers = [t.strip().upper() for t in parsed.get("tickers", []) if isinstance(t, str)]
+    explanation = parsed.get("explanation", clean)
 
     prices = fetch_many_last_close(tickers) if tickers else {}
     return {
@@ -235,73 +234,3 @@ def ai_recommend(req: RecommendReq):
         "explanation": explanation,
         "prices": prices
     }
-
-
-# ---------------- PORTFOLIO: BUILD & VIEW ----------------
-@app.post("/portfolio/build")
-def build_portfolio(req: BuildReq):
-    """
-    Создаём виртуальный портфель:
-      - если weights не переданы — равные доли
-      - qty считается так, чтобы сумма = budget (из UserPref), округляем qty вниз по цене
-    """
-    db = SessionLocal()
-    pref = db.query(UserPref).first()
-    budget = float(pref.budget if pref else 10000.0)
-
-    tickers = [t.strip().upper() for t in req.tickers if t.strip()]
-    if not tickers:
-        db.close()
-        return JSONResponse({"error": "tickers is empty"}, status_code=400)
-
-    if req.weights and len(req.weights) == len(tickers):
-        weights = req.weights
-        s = sum(w for w in weights if w is not None)
-        weights = [w / s for w in weights]
-    else:
-        w = 1.0 / len(tickers)
-        weights = [w] * len(tickers)
-
-    # очищаем старые
-    db.query(PortfolioHolding).delete()
-
-    prices = fetch_many_last_close(tickers)
-    total_alloc_value = 0.0
-    rows: list[PortfolioHolding] = []
-
-    # сначала считаем целевые суммы и qty
-    for t, w in zip(tickers, weights):
-        target_value = budget * w
-        price = prices.get(t) or 0.0
-        qty = int(target_value // price) if price > 0 else 0
-        line_value = qty * price
-        total_alloc_value += line_value
-        rows.append(PortfolioHolding(ticker=t, weight=w, qty=qty, last_price=price))
-
-    for r in rows:
-        r.updated_at = datetime.utcnow()
-        db.add(r)
-    db.commit()
-
-    out = [
-        {"ticker": r.ticker, "weight": r.weight, "qty": r.qty, "last_price": r.last_price}
-        for r in db.query(PortfolioHolding).all()
-    ]
-    db.close()
-
-    return {
-        "budget": budget,
-        "allocated_value": round(total_alloc_value, 2),
-        "uninvested_cash": round(budget - total_alloc_value, 2),
-        "holdings": out,
-    }
-
-@app.get("/portfolio/holdings")
-def get_holdings():
-    db = SessionLocal()
-    rows = db.query(PortfolioHolding).all()
-    db.close()
-    return [
-        {"ticker": r.ticker, "weight": r.weight, "qty": r.qty, "last_price": r.last_price, "updated_at": r.updated_at}
-        for r in rows
-    ]
