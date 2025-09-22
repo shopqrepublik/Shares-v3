@@ -5,6 +5,7 @@ services:
     plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port 10000"
+    healthCheckPath: /ping
     envVars:
       - key: ALPACA_API_KEY
         sync: false
