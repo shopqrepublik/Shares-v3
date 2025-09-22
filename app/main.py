@@ -197,14 +197,10 @@ def ai_recommend(req: RecommendReq):
 
     parsed = {"tickers": [], "explanation": raw_answer}
     try:
-        # Если JSON начинается с { и заканчивается }, грузим напрямую
-        if clean_answer.startswith("{") and clean_answer.endswith("}"):
-            parsed = json.loads(clean_answer)
-        else:
-            # fallback: ищем JSON внутри текста
-            match = re.search(r"\{.*\}", clean_answer, flags=re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
+        # Ищем JSON между первой { и последней }
+        match = re.search(r"\{.*\}", clean_answer, flags=re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
     except Exception:
         return {
             "strategy": req.strategy,
@@ -213,7 +209,7 @@ def ai_recommend(req: RecommendReq):
             "prices": {}
         }
 
-    # Загружаем цены (5 дней, чтобы всегда было закрытие)
+    # Загружаем цены (берём 5 дней, чтобы всегда было закрытие)
     prices = {}
     for ticker in parsed.get("tickers", []):
         try:
