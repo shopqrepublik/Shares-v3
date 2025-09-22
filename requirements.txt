@@ -8,5 +8,5 @@ alpaca-py
 sqlalchemy
 python-dotenv
 matplotlib
-openai
+openai>=1.0.0
 reportlab
