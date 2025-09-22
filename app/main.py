@@ -39,6 +39,10 @@ class RecommendReq(BaseModel):
     strategy: str
 
 # ---------------- HEALTH ----------------
+@app.get("/", tags=["health"])
+def root():
+    return {"status": "ok"}
+
 @app.get("/ping", tags=["health"])
 def ping():
     return {"message": "pong"}
