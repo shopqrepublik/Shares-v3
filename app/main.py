@@ -234,3 +234,43 @@ def ai_recommend(req: RecommendReq):
         "explanation": explanation,
         "prices": prices
     }
+
+# ---------------- DEBUG CONNECTIONS ----------------
+@app.get("/debug/connections")
+def debug_connections():
+    results = {}
+
+    # 1. Проверяем OpenAI
+    try:
+        if not client:
+            results["openai"] = "❌ API key not configured"
+        else:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "ping"}],
+                response_format={"type": "json_object"}
+            )
+            # пробуем взять ответ
+            try:
+                parsed = resp.choices[0].message.parsed
+                results["openai"] = f"✅ OK (parsed JSON: {parsed})"
+            except AttributeError:
+                raw = resp.choices[0].message.content
+                results["openai"] = f"⚠️ fallback content: {raw[:100]}..."
+    except Exception as e:
+        results["openai"] = f"❌ error: {str(e)}"
+
+    # 2. Проверяем yfinance (AAPL)
+    try:
+        import yfinance as yf
+        data = yf.Ticker("AAPL").history(period="5d")
+        if not data.empty:
+            last_price = round(data["Close"].iloc[-1], 2)
+            results["yfinance"] = f"✅ OK (AAPL last close: {last_price})"
+        else:
+            results["yfinance"] = "⚠️ empty response for AAPL"
+    except Exception as e:
+        results["yfinance"] = f"❌ error: {str(e)}"
+
+    return results
+
