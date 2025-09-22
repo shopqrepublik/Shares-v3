@@ -8,5 +8,5 @@ openai==1.43.0
 yfinance==0.2.50
 pandas==2.2.1
 numpy==1.26.0
-
-
+mplfinance==0.12.10b0
+scikit-learn==1.5.2
