@@ -23,17 +23,39 @@ from app.models import (
 from app.utils import fetch_spy_last_close
 
 # ---------------- INIT ----------------
-init_db()
+import logging, traceback
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("startup")
+
+DB_READY = False
+DB_INIT_ERR = None
+
+try:
+    logger.info("🔧 init_db() starting with DATABASE_URL=%s", os.getenv("DATABASE_URL"))
+    init_db()
+    DB_READY = True
+    logger.info("✅ init_db() completed")
+except Exception:
+    DB_READY = False
+    DB_INIT_ERR = traceback.format_exc()
+    logger.exception("❌ init_db() failed")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI(title="AI Portfolio Bot", version="1.1")
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 logger.info("🚀 FastAPI app created, starting up...")
+
+
+@app.get("/health", tags=["health"])
+def health():
+    return {
+        "status": "ok" if DB_READY else "degraded",
+        "service": "ai-portfolio-bot",
+        "db_ready": DB_READY,
+        "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
+    }
 
 # ---------------- MIDDLEWARE ----------------
 app.add_middleware(
