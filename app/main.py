@@ -29,6 +29,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI(title="AI Portfolio Bot", version="1.1")
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info("🚀 FastAPI app created, starting up...")
 
 # ---------------- MIDDLEWARE ----------------
 app.add_middleware(
