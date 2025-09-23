@@ -1,17 +1,30 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
+
+# FastAPI / сервер
 fastapi==0.115.2
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
 pydantic-settings==2.6.0
 
-# Финансовые данные / бэктест:
+# ORM / БД
+SQLAlchemy==2.0.36
+
+# Финансовые данные / ML
 pandas==2.2.2
 numpy==1.26.4
 yfinance==0.2.43
 scikit-learn==1.5.2
 
-# ML (опционально, для LSTM). Можно отключить через флаг USE_TORCH=0:
+# Графики/репорты
+matplotlib==3.9.2
+mplfinance==0.12.10b0
+reportlab==4.2.5
+
+# OpenAI SDK (под ваш код: from openai import OpenAI)
+openai==1.51.2
+
+# (опционально) LSTM на CPU – можно убрать, если не нужно
 torch==2.4.1+cpu
 
-# Документация/утилиты (по желанию):
+# Утилиты
 python-dotenv==1.0.1
