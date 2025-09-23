@@ -4,17 +4,11 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-import os, json, io, base64
-import yfinance as yf
-import numpy as np
-from sklearn.linear_model import LinearRegression
-import mplfinance as mpf
+import os, json, logging, traceback  # только лёгкие импорты наверху
 
 print("PORT from env:", os.getenv("PORT"))
 
-from openai import OpenAI
+# --- локальные модули
 from app.models import (
     init_db, SessionLocal,
     PositionSnapshot, MetricsDaily,
@@ -22,42 +16,41 @@ from app.models import (
 )
 from app.utils import fetch_spy_last_close
 
-# ---------------- INIT ----------------
-import logging, traceback, os
+# --- OpenAI SDK безопасно (если пакета нет — не роняем импорт модуля)
+try:
+    from openai import OpenAI
+except Exception as e:
+    OpenAI = None
+    logging.getLogger("startup").warning("OpenAI SDK not available: %s", e)
 
+# ---------------- INIT (logging + DB safe init) ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("startup")
 
 DB_READY = False
 DB_INIT_ERR = None
 
+# Можно управлять инициализацией БД переменной окружения SKIP_DB_INIT=1
+SKIP_DB_INIT = os.getenv("SKIP_DB_INIT") == "1"
+
 try:
     logger.info("🔧 init_db() starting with DATABASE_URL=%s", os.getenv("DATABASE_URL"))
-    # Раскомментируй строку ниже, когда нужно реально инициализировать базу:
-    # init_db()
-    # Если init_db() успешно отработал → база готова
-    # DB_READY = True
-    logger.info("✅ init_db() completed (skipped or success)")
+    if SKIP_DB_INIT:
+        logger.warning("⚠️ SKIP_DB_INIT=1 → skipping init_db()")
+    else:
+        init_db()
+        DB_READY = True
+        logger.info("✅ init_db() completed")
 except Exception:
     DB_READY = False
     DB_INIT_ERR = traceback.format_exc()
     logger.exception("❌ init_db() failed")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAI) else None
 
 app = FastAPI(title="AI Portfolio Bot", version="1.1")
 logger.info("🚀 FastAPI app created, starting up...")
-
-
-@app.get("/health", tags=["health"])
-def health():
-    return {
-        "status": "ok" if DB_READY else "degraded",
-        "service": "ai-portfolio-bot",
-        "db_ready": DB_READY,
-        "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
-    }
 
 # ---------------- MIDDLEWARE ----------------
 app.add_middleware(
@@ -81,7 +74,12 @@ class RecommendReq(BaseModel):
 # ---------------- HEALTH ----------------
 @app.get("/health", tags=["health"])
 def health():
-    return {"status": "ok", "service": "ai-portfolio-bot"}
+    return {
+        "status": "ok" if DB_READY else "degraded",
+        "service": "ai-portfolio-bot",
+        "db_ready": DB_READY,
+        "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
+    }
 
 @app.get("/", tags=["health"])
 def root():
@@ -167,6 +165,10 @@ def get_daily_report():
 # ---------------- REPORT (PDF) ----------------
 @app.get("/report/pdf", tags=["reports"])
 def get_pdf_report():
+    # ЛЕНИВЫЕ ИМПОРТЫ ТЯЖЁЛЫХ БИБЛИОТЕК
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
     filename = "daily_report.pdf"
     db = SessionLocal()
     last = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
@@ -244,6 +246,8 @@ def seed_data():
 # ---------------- AI RECOMMEND ----------------
 @app.post("/ai/recommend", tags=["ai"])
 def ai_recommend(req: RecommendReq):
+    import yfinance as yf  # ленивый импорт
+
     if not client:
         return {
             "strategy": req.strategy,
@@ -306,13 +310,20 @@ def ai_recommend(req: RecommendReq):
 def technical_analysis(
     ticker: str = "AAPL", period: str = "6mo", interval: str = "1d", forecast_days: int = 14
 ):
+    # ленивые импорты
+    import yfinance as yf
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+    import mplfinance as mpf
+    import io, base64
+
     try:
-        # 1. Загружаем данные
+        # 1. Данные
         data = yf.download(ticker, period=period, interval=interval)
         if data.empty:
             return {"error": f"Нет данных для {ticker}"}
 
-        # 2. Строим свечной график
+        # 2. Свечной график
         buf = io.BytesIO()
         mpf.plot(data, type="candle", mav=(5, 20), volume=True, style="yahoo", savefig=buf)
         buf.seek(0)
@@ -386,8 +397,9 @@ def debug_connections():
     except Exception as e:
         results["openai"] = {"ok": False, "error": str(e)}
 
-    # yfinance check
+    # yfinance check (ленивый импорт)
     try:
+        import yfinance as yf
         data = yf.Ticker("AAPL").history(period="5d")
         if not data.empty:
             last_price = float(round(data["Close"].iloc[-1], 2))
