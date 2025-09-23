@@ -1,12 +1,16 @@
-fastapi==0.115.0
+fastapi==0.115.2
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
-sqlalchemy==2.0.34
-python-dotenv==1.0.1
-reportlab==4.2.2
-openai==1.43.0
-yfinance==0.2.50
-pandas==2.2.3
+pydantic-settings==2.6.0
+
+# Финансовые данные / бэктест:
+pandas==2.2.2
 numpy==1.26.4
-mplfinance==0.12.10b0
+yfinance==0.2.43
 scikit-learn==1.5.2
+
+# ML (опционально, для LSTM). Можно отключить через флаг USE_TORCH=0:
+torch==2.4.1
+
+# Документация/утилиты (по желанию):
+python-dotenv==1.0.1
