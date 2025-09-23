@@ -1,16 +1,26 @@
 from __future__ import annotations
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+# Базовый класс для моделей
 Base = declarative_base()
+
+# Конфигурация подключения к БД
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+
+engine = None
+SessionLocal = None
+
+# Разрешаем пропуск инициализации БД через переменную окружения
+if not os.getenv("SKIP_DB_INIT"):
+    connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    engine = create_engine(DATABASE_URL, connect_args=connect_args)
+    SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+# ------------------ МОДЕЛИ ------------------
 
 # Логи сделок (опционально)
 class TradeLog(Base):
@@ -25,6 +35,7 @@ class TradeLog(Base):
     status = Column(String, default="preview")
     note = Column(String, nullable=True)
 
+
 # Снимок позиций (для отчётов)
 class PositionSnapshot(Base):
     __tablename__ = "positions_snapshots"
@@ -35,6 +46,7 @@ class PositionSnapshot(Base):
     avg_price = Column(Float)
     market_price = Column(Float)
     market_value = Column(Float)
+
 
 # Метрики дня (для отчётов)
 class MetricsDaily(Base):
@@ -47,6 +59,7 @@ class MetricsDaily(Base):
     benchmark_value = Column(Float)
     note = Column(String, nullable=True)
 
+
 # Настройки пользователя / онбординг
 class UserPref(Base):
     __tablename__ = "user_prefs"
@@ -55,6 +68,7 @@ class UserPref(Base):
     goal = Column(String, default="growth")  # growth / income / balanced
     risk = Column(String, default="medium")  # low / medium / high
     horizon_years = Column(Integer, default=5)
+
 
 # Текущий «построенный» портфель (симулятор)
 class PortfolioHolding(Base):
@@ -66,7 +80,14 @@ class PortfolioHolding(Base):
     last_price = Column(Float, default=0.0)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+
+# ------------------ INIT ------------------
+
 def init_db():
+    """Создание таблиц (если не пропущена инициализация)"""
+    if engine is None:
+        return None
     Base.metadata.create_all(engine)
     return engine
+
 
