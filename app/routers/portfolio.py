@@ -31,3 +31,22 @@ def generate_portfolio(req: PortfolioRequest):
 
     # Расчёт лотов условный (без брокера): budget * weight / last_price
     return {"allocation": allocation}
+import yfinance as yf
+from datetime import datetime, timedelta
+
+@router.get("/track")
+def track_portfolio(symbols: str, benchmark: str = "SPY", days: int = 365):
+    # symbols = "SPY,QQQ,..." (фактический портфель)
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    end = datetime.utcnow()
+    start = end - timedelta(days=days)
+
+    data = yf.download(tickers + [benchmark], start=start.date(), end=end.date(), progress=False)["Adj Close"]
+    data = data.fillna(method="ffill")
+    rel = (data / data.iloc[0] - 1.0)  # доходность от старта
+
+    return {
+        "portfolio": {t: round(float(rel[t].iloc[-1]), 6) for t in tickers},
+        "benchmark": {benchmark: round(float(rel[benchmark].iloc[-1]), 6)},
+        "last_date": str(data.index[-1].date())
+    }
