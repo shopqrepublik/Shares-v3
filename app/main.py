@@ -1,6 +1,7 @@
 from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
@@ -11,17 +12,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import mplfinance as mpf
 
-# 👇 Добавь сюда сразу после импортов
 print("PORT from env:", os.getenv("PORT"))
-
-from openai import OpenAI
-from app.models import (
-    init_db, SessionLocal,
-    PositionSnapshot, MetricsDaily,
-    UserPref
-)
-from app.utils import fetch_spy_last_close
-
 
 from openai import OpenAI
 from app.models import (
@@ -39,6 +30,14 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI(title="AI Portfolio Bot", version="1.1")
 
+# ---------------- MIDDLEWARE ----------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ---------------- SCHEMAS ----------------
 class OnboardReq(BaseModel):
     budget: float
@@ -51,9 +50,13 @@ class RecommendReq(BaseModel):
     strategy: str
 
 # ---------------- HEALTH ----------------
+@app.get("/health", tags=["health"])
+def health():
+    return {"status": "ok", "service": "ai-portfolio-bot"}
+
 @app.get("/", tags=["health"])
 def root():
-    return {"status": "ok"}
+    return {"ok": True, "service": "ai-portfolio-bot"}
 
 @app.get("/ping", tags=["health"])
 def ping():
@@ -75,10 +78,15 @@ def onboard(req: OnboardReq):
     db.commit()
     db.refresh(pref)
     db.close()
-    return {"status": "ok", "pref": {
-        "budget": pref.budget, "goal": pref.goal,
-        "risk": pref.risk, "horizon_years": pref.horizon_years
-    }}
+    return {
+        "status": "ok",
+        "pref": {
+            "budget": pref.budget,
+            "goal": pref.goal,
+            "risk": pref.risk,
+            "horizon_years": pref.horizon_years,
+        },
+    }
 
 # ---------------- POSITIONS ----------------
 @app.get("/positions", tags=["portfolio"])
@@ -93,7 +101,7 @@ def get_positions():
             "avg_price": p.avg_price,
             "market_price": p.market_price,
             "market_value": p.market_value,
-            "ts": p.ts
+            "ts": p.ts,
         }
         for p in positions
     ]
@@ -154,9 +162,10 @@ def get_pdf_report():
     for p in positions:
         c.setFont("Helvetica", 10)
         c.drawString(
-            100, y,
+            100,
+            y,
             f"{p.ticker} | Qty: {p.qty} | Avg: {p.avg_price} "
-            f"| Market: {p.market_price} | Value: {p.market_value}"
+            f"| Market: {p.market_price} | Value: {p.market_value}",
         )
         y -= 15
         if y < 100:
@@ -170,18 +179,35 @@ def get_pdf_report():
 @app.post("/seed", tags=["debug"])
 def seed_data():
     db = SessionLocal()
-    db.add(PositionSnapshot(
-        ts=datetime.utcnow(), ticker="AAPL", qty=10,
-        avg_price=150.0, market_price=155.0, market_value=1550.0
-    ))
-    db.add(PositionSnapshot(
-        ts=datetime.utcnow(), ticker="TSLA", qty=5,
-        avg_price=700.0, market_price=710.0, market_value=3550.0
-    ))
-    db.add(MetricsDaily(
-        ts=datetime.utcnow(), equity=10000.0, pnl_day=200.0, pnl_total=1200.0,
-        benchmark_value=fetch_spy_last_close() or 400.0
-    ))
+    db.add(
+        PositionSnapshot(
+            ts=datetime.utcnow(),
+            ticker="AAPL",
+            qty=10,
+            avg_price=150.0,
+            market_price=155.0,
+            market_value=1550.0,
+        )
+    )
+    db.add(
+        PositionSnapshot(
+            ts=datetime.utcnow(),
+            ticker="TSLA",
+            qty=5,
+            avg_price=700.0,
+            market_price=710.0,
+            market_value=3550.0,
+        )
+    )
+    db.add(
+        MetricsDaily(
+            ts=datetime.utcnow(),
+            equity=10000.0,
+            pnl_day=200.0,
+            pnl_total=1200.0,
+            benchmark_value=fetch_spy_last_close() or 400.0,
+        )
+    )
     db.commit()
     db.close()
     return {"status": "seeded"}
@@ -194,16 +220,22 @@ def ai_recommend(req: RecommendReq):
             "strategy": req.strategy,
             "tickers": [],
             "explanation": "OpenAI API key not configured",
-            "prices": {}
+            "prices": {},
         }
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Ты — финансовый аналитик. Верни JSON с полями: tickers (список тикеров) и explanation (объяснение)."},
-            {"role": "user", "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}"}
+            {
+                "role": "system",
+                "content": "Ты — финансовый аналитик. Верни JSON с полями: tickers (список тикеров) и explanation (объяснение).",
+            },
+            {
+                "role": "user",
+                "content": f"Стратегия: {req.strategy}\nЗапрос: {req.prompt}",
+            },
         ],
-        response_format={"type": "json_object"}
+        response_format={"type": "json_object"},
     )
 
     parsed = {}
@@ -237,12 +269,14 @@ def ai_recommend(req: RecommendReq):
         "strategy": req.strategy,
         "tickers": tickers,
         "explanation": explanation,
-        "prices": prices
+        "prices": prices,
     }
 
 # ---------------- AI TECHNICAL ANALYSIS ----------------
 @app.post("/ai/technical", tags=["ai"])
-def technical_analysis(ticker: str = "AAPL", period: str = "6mo", interval: str = "1d", forecast_days: int = 14):
+def technical_analysis(
+    ticker: str = "AAPL", period: str = "6mo", interval: str = "1d", forecast_days: int = 14
+):
     try:
         # 1. Загружаем данные
         data = yf.download(ticker, period=period, interval=interval)
@@ -251,7 +285,7 @@ def technical_analysis(ticker: str = "AAPL", period: str = "6mo", interval: str 
 
         # 2. Строим свечной график
         buf = io.BytesIO()
-        mpf.plot(data, type="candle", mav=(5,20), volume=True, style="yahoo", savefig=buf)
+        mpf.plot(data, type="candle", mav=(5, 20), volume=True, style="yahoo", savefig=buf)
         buf.seek(0)
         img_bytes = buf.read()
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -270,11 +304,17 @@ def technical_analysis(ticker: str = "AAPL", period: str = "6mo", interval: str 
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "Ты — эксперт по техническому анализу акций."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": f"Это свечной график {ticker} за период {period}. Проанализируй тренд, паттерны и сделай прогноз на {forecast_days} дней."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                    ]}
-                ]
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"Это свечной график {ticker} за период {period}. Проанализируй тренд, паттерны и сделай прогноз на {forecast_days} дней.",
+                            },
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        ],
+                    },
+                ],
             )
             ai_analysis = resp.choices[0].message.content
 
@@ -285,7 +325,7 @@ def technical_analysis(ticker: str = "AAPL", period: str = "6mo", interval: str 
             "forecast_days": forecast_days,
             "ai_analysis": ai_analysis,
             "forecast_prices": forecast,
-            "chart_base64": img_b64
+            "chart_base64": img_b64,
         }
 
     except Exception as e:
@@ -304,7 +344,7 @@ def debug_connections():
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": "ping"}],
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
             )
             parsed = getattr(resp.choices[0].message, "parsed", None)
             content = getattr(resp.choices[0].message, "content", None)
@@ -329,4 +369,3 @@ def debug_connections():
         results["yfinance"] = {"ok": False, "error": str(e)}
 
     return results
-
