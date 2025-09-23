@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.115.2
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
@@ -10,7 +11,7 @@ yfinance==0.2.43
 scikit-learn==1.5.2
 
 # ML (опционально, для LSTM). Можно отключить через флаг USE_TORCH=0:
-torch==2.4.1
+torch==2.4.1+cpu
 
 # Документация/утилиты (по желанию):
 python-dotenv==1.0.1
