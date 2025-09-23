@@ -23,7 +23,7 @@ from app.models import (
 from app.utils import fetch_spy_last_close
 
 # ---------------- INIT ----------------
-import logging, traceback
+import logging, traceback, os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("startup")
@@ -33,9 +33,11 @@ DB_INIT_ERR = None
 
 try:
     logger.info("🔧 init_db() starting with DATABASE_URL=%s", os.getenv("DATABASE_URL"))
-    #init_db()
-    DB_READY = True
-    logger.info("✅ init_db() completed")
+    # Раскомментируй строку ниже, когда нужно реально инициализировать базу:
+    # init_db()
+    # Если init_db() успешно отработал → база готова
+    # DB_READY = True
+    logger.info("✅ init_db() completed (skipped or success)")
 except Exception:
     DB_READY = False
     DB_INIT_ERR = traceback.format_exc()
