@@ -1,1 +1,1 @@
-web: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --reload --log-level debug
+web: uvicorn app.main:app --host 0.0.0.0 --port $PORT --log-level debug --timeout-keep-alive 120
