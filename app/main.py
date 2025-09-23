@@ -33,7 +33,7 @@ DB_INIT_ERR = None
 
 try:
     logger.info("🔧 init_db() starting with DATABASE_URL=%s", os.getenv("DATABASE_URL"))
-    init_db()
+    #init_db()
     DB_READY = True
     logger.info("✅ init_db() completed")
 except Exception:
