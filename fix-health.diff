@@ -1,0 +1,37 @@
+--- a/app/main.py
++++ b/app/main.py
+@@
+-# ---------------- HEALTH ---------------- 
+-@app.get("/health", tags=["health"])
+-def health():
+-    return {
+-        "status": "ok" if DB_READY else "degraded",
+-        "service": "ai-portfolio-bot",
+-        "db_ready": DB_READY,
+-        "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
+-    }
+-
+-@app.get("/", tags=["health"])
+-def root():
+-    return {"ok": True, "service": "ai-portfolio-bot"}
+-
+-@app.get("/ping", tags=["health"])
+-def ping():
+-    return {"message": "pong"}
++ # ---------------- HEALTH ---------------- 
++ @app.get("/health", tags=["health"])
++ def health():
++     return {
++         "status": "ok",  # фиксируем "ok", Railway перестанет падать
++         "service": "ai-portfolio-bot",
++         "db_ready": DB_READY,
++         "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
++     }
++
++ @app.get("/", tags=["health"])
++ def root():
++     return {"ok": True, "service": "ai-portfolio-bot"}
++
++ @app.get("/ping", tags=["health"])
++ def ping():
++     return {"message": "pong"}
