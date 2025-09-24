@@ -8,6 +8,7 @@ pydantic-settings==2.6.0
 
 # ORM / БД
 SQLAlchemy==2.0.36
+psycopg2-binary==2.9.9
 
 # Финансовые данные / ML
 pandas==2.2.2
@@ -20,10 +21,10 @@ matplotlib==3.9.2
 mplfinance==0.12.10b0
 reportlab==4.2.5
 
-# OpenAI SDK (под ваш код: from openai import OpenAI)
+# OpenAI SDK
 openai==1.51.2
 
-# (опционально) LSTM на CPU – можно убрать, если не нужно
+# (опционально) LSTM на CPU
 torch==2.4.1+cpu
 
 # Утилиты
