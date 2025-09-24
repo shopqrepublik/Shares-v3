@@ -84,3 +84,4 @@ def onboard(req: OnboardRequest):
         portfolio=portfolio,
         message=f"Portfolio built for risk level {req.risk_level}"
     )
+    
