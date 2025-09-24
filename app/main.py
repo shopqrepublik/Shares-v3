@@ -1,29 +1,43 @@
-import logging, sys
+import logging, sys, os
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
-from sqlalchemy.orm import declarative_base
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.debug("🚀 main.py started loading")
 
-# ---------------- APP ----------------
-app = FastAPI(title="AI Portfolio Bot", version="0.3-test")
-
-# ---------------- SQLALCHEMY (только Base и модель) ----------------
+# ---------------- DB SETUP ----------------
 Base = declarative_base()
+engine = None
+SessionLocal = None
+DB_READY = False
+DB_INIT_ERR = None
 
+try:
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+    engine = create_engine(DATABASE_URL, echo=False, future=True)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    DB_READY = True
+    logging.debug(f"✅ create_engine success, url={DATABASE_URL}")
+except Exception as e:
+    DB_INIT_ERR = str(e)
+    logging.error(f"❌ create_engine failed: {e}")
+
+# ---------------- MODELS ----------------
 class TradeLog(Base):
     __tablename__ = "trade_logs"
-    # Поля определены, но engine/SessionLocal не создаём
-    from sqlalchemy import Column, Integer, String, Float, DateTime
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String, index=True)
-    action = Column(String)       # buy/sell
+    action = Column(String)  # buy/sell
     qty = Column(Float)
     price = Column(Float)
     timestamp = Column(DateTime)
+
+# ---------------- APP ----------------
+app = FastAPI(title="AI Portfolio Bot", version="0.3.1")
 
 # ---------------- SCHEMAS ----------------
 class OnboardRequest(BaseModel):
@@ -47,8 +61,8 @@ def health():
     return {
         "status": "ok",
         "service": "ai-portfolio-bot",
-        "db_ready": False,   # пока база не используется
-        "db_error": None
+        "db_ready": DB_READY,
+        "db_error": DB_INIT_ERR[:200] if DB_INIT_ERR else None
     }
 
 @app.get("/", tags=["health"])
