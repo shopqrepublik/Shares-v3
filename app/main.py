@@ -57,7 +57,7 @@ if DB_READY:
     init_db()
 
 # ---------------- FASTAPI APP ----------------
-app = FastAPI(title="AI Portfolio Bot", version="0.5")
+app = FastAPI(title="AI Portfolio Bot", version="0.6")
 
 # ---------------- Pydantic Schemas ----------------
 class OnboardRequest(BaseModel):
@@ -69,6 +69,10 @@ class PortfolioResponse(BaseModel):
     assets: list[str]
     allocation: list[float]
     expected_return: float
+
+class ForecastRequest(BaseModel):
+    symbol: str
+    days: int = 5
 
 # ---------------- ROUTES ----------------
 @app.get("/ping", tags=["health"])
@@ -127,3 +131,46 @@ def report_pdf():
     return StreamingResponse(buffer, media_type="application/pdf", headers={
         "Content-Disposition": "inline; filename=report.pdf"
     })
+
+# ---------------- AI FORECAST ----------------
+@app.post("/forecast/price")
+def forecast_price(req: ForecastRequest):
+    try:
+        import pandas as pd
+        import yfinance as yf
+        from sklearn.linear_model import LinearRegression
+        import numpy as np
+
+        logging.info(f"Fetching data for {req.symbol}")
+        data = yf.download(req.symbol, period="6mo", interval="1d")
+        if data.empty:
+            return {"error": f"No data for {req.symbol}"}
+
+        # Подготовка данных
+        data = data.reset_index()
+        data["Day"] = np.arange(len(data))
+        X = data[["Day"]].values
+        y = data["Close"].values
+
+        model = LinearRegression()
+        model.fit(X, y)
+
+        # Прогноз на req.days дней вперёд
+        future_days = np.arange(len(data), len(data) + req.days).reshape(-1, 1)
+        preds = model.predict(future_days)
+
+        forecast = [
+            {"day": int(len(data) + i), "predicted_price": float(pred)}
+            for i, pred in enumerate(preds)
+        ]
+
+        return {
+            "symbol": req.symbol,
+            "generated_at": datetime.utcnow().isoformat(),
+            "forecast_days": req.days,
+            "forecast": forecast,
+        }
+
+    except Exception as e:
+        logging.error(f"❌ Forecast failed: {e}")
+        return {"error": str(e)}
