@@ -1,6 +1,7 @@
-import logging, sys, os
+import logging, sys, os, time
 from datetime import datetime
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
@@ -10,6 +11,8 @@ import io
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logger = logging.getLogger("uvicorn")
+logger.setLevel(logging.DEBUG)
 logging.debug("🚀 main.py started loading")
 
 # ---------------- SECURITY ----------------
@@ -28,7 +31,6 @@ DB_READY = False
 DB_INIT_ERR = None
 
 try:
-    from sqlalchemy import create_engine
     engine = create_engine(DATABASE_URL)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     DB_READY = True
@@ -62,6 +64,40 @@ if engine:
 
 # ---------------- FASTAPI APP ----------------
 app = FastAPI(title="AI Portfolio Bot")
+
+# CORS для фронтенда
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://wealth-dashboard-ai.lovable.app"],  # домен фронта
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------- MIDDLEWARE LOGGING ----------------
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    idem = hex(id(request))
+    logger.debug(f"➡️ {request.method} {request.url} (id={idem})")
+    start_time = time.time()
+
+    response = await call_next(request)
+
+    process_time = (time.time() - start_time) * 1000
+    logger.debug(f"⬅️ {request.method} {request.url} "
+                 f"completed_in={process_time:.2f}ms status={response.status_code} (id={idem})")
+    return response
+
+# ---------------- AUTH ----------------
+class AuthRequest(BaseModel):
+    password: str
+
+@app.post("/auth/check")
+def auth_check(data: AuthRequest):
+    """Проверка пароля для фронтенда"""
+    if data.password == API_PASSWORD:
+        return {"ok": True}
+    return {"ok": False}
 
 # ---------------- SCHEMAS ----------------
 class OnboardRequest(BaseModel):
