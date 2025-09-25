@@ -1,24 +1,41 @@
-import logging, sys
+import logging, sys, os
 from datetime import datetime
-from io import BytesIO
-import os
-
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+import io
 
+# ---------------- LOGGING ----------------
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.debug("🚀 main.py started loading")
 
-# ---------- База данных ----------
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+# ---------------- SECURITY ----------------
+API_PASSWORD = "AI_German"
 
+def verify_password(x_api_key: str = Header(None)):
+    if x_api_key != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# ---------------- DB SETUP ----------------
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+Base = declarative_base()
+engine = None
+SessionLocal = None
+DB_READY = False
+DB_INIT_ERR = None
+
+try:
+    from sqlalchemy import create_engine
+    engine = create_engine(DATABASE_URL)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    DB_READY = True
+    logging.debug(f"✅ create_engine success, url={DATABASE_URL}")
+except Exception as e:
+    DB_INIT_ERR = str(e)
+    logging.error(f"❌ create_engine failed: {e}")
 
 class TradeLog(Base):
     __tablename__ = "trade_logs"
@@ -29,56 +46,37 @@ class TradeLog(Base):
     price = Column(Float)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+def init_db():
+    global DB_READY, DB_INIT_ERR
+    if engine:
+        try:
+            Base.metadata.create_all(bind=engine)
+            DB_READY = True
+            logging.debug("✅ DB initialized")
+        except Exception as e:
+            DB_INIT_ERR = str(e)
+            logging.error(f"❌ DB init failed: {e}")
 
-class UserPref(Base):
-    __tablename__ = "user_prefs"
-    id = Column(Integer, primary_key=True)
-    budget = Column(Float, default=10000.0)
-    goal = Column(String, default="growth")
-    risk = Column(String, default="medium")
-    horizon_years = Column(Integer, default=5)
-    created_at = Column(DateTime, default=datetime.utcnow)
+if engine:
+    init_db()
 
+# ---------------- FASTAPI APP ----------------
+app = FastAPI(title="AI Portfolio Bot")
 
-class PortfolioHolding(Base):
-    __tablename__ = "portfolio_holdings"
-    id = Column(Integer, primary_key=True)
-    symbol = Column(String, index=True)
-    weight = Column(Float)
-    qty = Column(Float, default=0.0)
-    last_price = Column(Float, default=0.0)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+# ---------------- SCHEMAS ----------------
+class OnboardRequest(BaseModel):
+    budget: float
+    risk_level: str
+    goals: str
 
+class PortfolioResponse(BaseModel):
+    assets: list
+    note: str
 
-class MetricsDaily(Base):
-    __tablename__ = "metrics_daily"
-    id = Column(Integer, primary_key=True)
-    ts = Column(DateTime, default=datetime.utcnow, index=True)
-    equity = Column(Float)
-    pnl_day = Column(Float)
-    pnl_total = Column(Float)
-    benchmark_value = Column(Float)
-    note = Column(String, nullable=True)
-
-
-try:
-    Base.metadata.create_all(bind=engine)
-    logging.debug("✅ DB initialized")
-    DB_READY = True
-    DB_INIT_ERR = None
-except Exception as e:
-    logging.error(f"❌ DB init failed: {e}")
-    DB_READY = False
-    DB_INIT_ERR = str(e)
-
-# ---------- FastAPI ----------
-app = FastAPI()
-
-
+# ---------------- HEALTH ----------------
 @app.get("/ping", tags=["health"])
 def ping():
     return {"message": "pong"}
-
 
 @app.get("/health", tags=["health"])
 def health():
@@ -89,181 +87,77 @@ def health():
         "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
     }
 
-
 @app.get("/", tags=["health"])
 def root():
     return {"ok": True, "service": "ai-portfolio-bot"}
 
-
-# ---------- Модели запросов ----------
-class OnboardRequest(BaseModel):
-    budget: float
-    risk_level: str
-    goals: str
-
-
-class ForecastRequest(BaseModel):
-    symbol: str
-    days: int = 5
-
-
-# ---------- Эндпоинты ----------
-@app.post("/onboard")
+# ---------------- BUSINESS ENDPOINTS ----------------
+@app.post("/onboard", dependencies=[Depends(verify_password)])
 def onboard(req: OnboardRequest):
-    db = SessionLocal()
-    try:
-        pref = db.query(UserPref).first()
-        if not pref:
-            pref = UserPref()
-            db.add(pref)
-        pref.budget = req.budget
-        pref.goal = req.goals
-        pref.risk = req.risk_level
-        pref.horizon_years = 5
-        db.commit()
-        return {"saved": True, "pref": {
-            "budget": pref.budget,
-            "goal": pref.goal,
-            "risk": pref.risk,
-            "horizon_years": pref.horizon_years
-        }}
-    finally:
-        db.close()
+    return {
+        "status": "ok",
+        "saved": req.dict()
+    }
 
+@app.post("/portfolio/build", dependencies=[Depends(verify_password)])
+def build_portfolio(risk: str):
+    if risk == "low":
+        assets = ["BND", "VNQ", "VOO"]
+    elif risk == "medium":
+        assets = ["VOO", "QQQ", "IWM"]
+    else:
+        assets = ["SPY", "ARKK", "TSLA", "NVDA"]
+    return {"portfolio": assets}
 
-@app.post("/portfolio/build")
-def build_portfolio(risk: str = "medium"):
-    db = SessionLocal()
-    try:
-        db.query(PortfolioHolding).delete()  # очистить старый портфель
-        if risk == "low":
-            holdings = [("SPY", 0.7), ("AGG", 0.3)]
-        elif risk == "medium":
-            holdings = [("SPY", 0.5), ("QQQ", 0.3), ("IWM", 0.2)]
-        else:  # high
-            holdings = [("QQQ", 0.5), ("IWM", 0.3), ("XYZM", 0.2)]  # XYZM = micro-cap demo
-        for sym, w in holdings:
-            h = PortfolioHolding(symbol=sym, weight=w, qty=0.0)
-            db.add(h)
-        db.commit()
-        return {"ok": True, "holdings": holdings}
-    finally:
-        db.close()
+@app.get("/portfolio/holdings", dependencies=[Depends(verify_password)])
+def portfolio_holdings():
+    return {"holdings": ["AAPL", "MSFT", "GOOG"]}
 
-
-@app.get("/portfolio/holdings")
-def get_portfolio():
-    db = SessionLocal()
-    try:
-        holds = db.query(PortfolioHolding).all()
-        return [{"symbol": h.symbol, "weight": h.weight, "qty": h.qty, "last_price": h.last_price} for h in holds]
-    finally:
-        db.close()
-
-
-@app.post("/metrics/refresh")
-def refresh_metrics():
-    import yfinance as yf
-    db = SessionLocal()
-    try:
-        holds = db.query(PortfolioHolding).all()
-        if not holds:
-            return {"error": "no holdings"}
-        total = 0.0
-        for h in holds:
-            try:
-                price = yf.Ticker(h.symbol).history(period="1d")["Close"].iloc[-1]
-                h.last_price = float(price)
-                total += h.weight * 10000 * h.last_price
-                h.updated_at = datetime.utcnow()
-            except Exception:
-                pass
-        spy = yf.Ticker("SPY").history(period="1d")["Close"].iloc[-1]
-        m = MetricsDaily(
-            equity=total, pnl_day=0.0, pnl_total=0.0,
-            benchmark_value=float(spy)
-        )
-        db.add(m)
-        db.commit()
-        return {"ok": True, "equity": total, "benchmark": float(spy)}
-    finally:
-        db.close()
-
-
-@app.get("/metrics/daily/latest")
-def get_latest_metrics():
-    db = SessionLocal()
-    try:
-        m = db.query(MetricsDaily).order_by(MetricsDaily.ts.desc()).first()
-        if not m:
-            return {"error": "no metrics"}
-        return {
-            "ts": m.ts, "equity": m.equity,
-            "pnl_day": m.pnl_day, "pnl_total": m.pnl_total,
-            "benchmark": m.benchmark_value
-        }
-    finally:
-        db.close()
-
-
-@app.post("/forecast/price")
-def forecast_price(req: ForecastRequest):
+@app.post("/forecast/price", dependencies=[Depends(verify_password)])
+def forecast_price(symbol: str, days: int = 5):
+    # Lazy import heavy libs
+    import pandas as pd
+    import numpy as np
     import yfinance as yf
     from sklearn.linear_model import LinearRegression
-    import numpy as np
-    hist = yf.Ticker(req.symbol).history(period="6mo")
-    prices = hist["Close"].values
-    X = np.arange(len(prices)).reshape(-1, 1)
-    y = prices
+
+    data = yf.download(symbol, period="6mo")
+    if data.empty:
+        raise HTTPException(status_code=400, detail="No data for symbol")
+    data = data.reset_index()
+    data["t"] = np.arange(len(data))
+    X = data[["t"]]
+    y = data["Close"]
+
     model = LinearRegression().fit(X, y)
-    future_X = np.arange(len(prices), len(prices) + req.days).reshape(-1, 1)
-    preds = model.predict(future_X)
-    return {"symbol": req.symbol,
-            "forecast": [{"day": i + 1, "price": float(p)} for i, p in enumerate(preds)]}
 
+    future_t = np.arange(len(data), len(data) + days).reshape(-1, 1)
+    preds = model.predict(future_t)
 
-@app.get("/report/json")
+    forecast = [{"day": i+1, "price": float(p)} for i, p in enumerate(preds)]
+    return {"symbol": symbol, "forecast": forecast}
+
+@app.get("/report/json", dependencies=[Depends(verify_password)])
 def report_json():
-    db = SessionLocal()
-    try:
-        holds = db.query(PortfolioHolding).all()
-        return {"portfolio": [{"symbol": h.symbol, "weight": h.weight, "last_price": h.last_price} for h in holds]}
-    finally:
-        db.close()
+    report = {"portfolio": ["AAPL", "TSLA"], "performance": {"return": 0.12, "volatility": 0.08}}
+    return JSONResponse(content=report)
 
-
-@app.get("/report/pdf")
+@app.get("/report/pdf", dependencies=[Depends(verify_password)])
 def report_pdf():
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
-    buffer = BytesIO()
+
+    buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
-    c.drawString(100, 750, "Investment Portfolio Report")
-    c.drawString(100, 730, "Generated by ai-portfolio-bot")
-    c.showPage()
+    c.drawString(100, 750, "Portfolio Report")
+    c.drawString(100, 730, "Assets: AAPL, TSLA")
+    c.drawString(100, 710, "Return: 12%  |  Volatility: 8%")
     c.save()
+
     buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": "inline; filename=report.pdf"})
+    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=report.pdf"})
 
-
-@app.get("/advice/ai")
+@app.get("/advice/ai", dependencies=[Depends(verify_password)])
 def advice_ai():
-    import os
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        # Rule-based советы
-        return {"advice": [
-            "Снизьте долю micro-cap до 5–7% от портфеля.",
-            "Не концентрируйте >40% в одном активе.",
-            "Пересматривайте портфель каждые 6 месяцев."
-        ]}
-    else:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        prompt = "Дай 3 совета по ребалансировке портфеля с учётом риска."
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = resp.choices[0].message.content
-        return {"advice": text}
+    # Пока без OpenAI, заглушка
+    return {"advice": "Rebalance into more ETFs to reduce risk."}
