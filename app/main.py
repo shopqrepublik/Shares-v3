@@ -1,14 +1,14 @@
 import logging
 import sys
+import os
+import time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Depends, Request, Response, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
-import os
-import time
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # ---------------- FASTAPI ----------------
 app = FastAPI(title="AI Portfolio Bot")
 
-# CORS — укажите ваш фронт
+# CORS — ваш фронт
 origins = [
     "https://wealth-dashboard-ai.lovable.app",
     "http://localhost:3000"
@@ -29,20 +29,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------- MIDDLEWARE: LOG ----------------
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    idem = f"{request.method} {request.url.path}"
-    start_time = time.time()
-    try:
-        response = await call_next(request)
-        process_time = (time.time() - start_time) * 1000
-        logger.info(f"{idem} completed_in={process_time:.2f}ms status={response.status_code}")
-        return response
-    except Exception as e:
-        logger.exception(f"ERROR in {idem}: {e}")
-        raise
 
 # ---------------- DB ----------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -64,16 +50,11 @@ except Exception as e:
 # ---------------- AUTH ----------------
 API_PASSWORD = "AI_German"
 
-def verify_password(x_api_key: Optional[str] = None):
-    if x_api_key != API_PASSWORD:
+def check_api_key(request: Request):
+    key = request.headers.get("x-api-key")
+    if key != API_PASSWORD:
+        logger.warning(f"Unauthorized request: x-api-key={key}")
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-@app.post("/auth/check")
-def auth_check(payload: dict):
-    password = payload.get("password")
-    if password == API_PASSWORD:
-        return {"ok": True}
-    return {"ok": False}
 
 # ---------------- HEALTH ----------------
 @app.get("/ping")
@@ -90,18 +71,20 @@ def health():
     }
 
 # ---------------- ONBOARDING ----------------
-@app.post("/onboard", dependencies=[Depends(verify_password)])
-def onboard(data: dict, db: Session = Depends(SessionLocal)):
+@app.post("/onboard")
+async def onboard(request: Request):
+    check_api_key(request)
+    data = await request.json()
     budget = data.get("budget")
     risk = data.get("risk")
     goals = data.get("goals")
-    logger.info(f"Onboarding: budget={budget}, risk={risk}, goals={goals}")
-    # тут можно сохранить в таблицу users
-    return {"status": "ok", "saved": True}
+    logger.info(f"Onboarding received: {data}")
+    return {"status": "ok", "saved": True, "data": data}
 
 # ---------------- PORTFOLIO ----------------
-@app.get("/portfolio/holdings", dependencies=[Depends(verify_password)])
-def portfolio_holdings():
+@app.get("/portfolio/holdings")
+def portfolio_holdings(request: Request):
+    check_api_key(request)
     holdings = [
         {
             "ticker": "AAPL",
@@ -129,28 +112,3 @@ def portfolio_holdings():
         }
     ]
     return {"holdings": holdings}
-
-# ---------------- METRICS ----------------
-@app.post("/metrics/refresh", dependencies=[Depends(verify_password)])
-def metrics_refresh():
-    return {"status": "ok", "refreshed_at": datetime.utcnow().isoformat()}
-
-# ---------------- FORECAST ----------------
-@app.post("/forecast/price", dependencies=[Depends(verify_password)])
-def forecast_price(data: dict):
-    symbol = data.get("symbol", "AAPL")
-    days = data.get("days", 5)
-    forecast = [{"day": i+1, "predicted_price": 150 + i} for i in range(days)]
-    return {"symbol": symbol, "forecast": forecast}
-
-# ---------------- ADVICE ----------------
-@app.post("/advice/ai", dependencies=[Depends(verify_password)])
-def advice_ai(data: dict):
-    return {
-        "advice": f"Based on your risk profile '{data.get('risk','medium')}', diversify into AAPL, MSFT, and GOOG."
-    }
-
-# ---------------- REPORT ----------------
-@app.get("/report/json", dependencies=[Depends(verify_password)])
-def report_json():
-    return {"portfolio": []}
