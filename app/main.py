@@ -1,120 +1,86 @@
-import logging, sys, os, time
+import logging
+import sys
 from datetime import datetime
-from fastapi import FastAPI, Depends, HTTPException, Header, Request
+from typing import Optional
+
+from fastapi import FastAPI, Depends, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-import io
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+import os
+import time
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
-logger = logging.getLogger("uvicorn")
-logger.setLevel(logging.DEBUG)
-logging.debug("🚀 main.py started loading")
+logger = logging.getLogger(__name__)
 
-# ---------------- SECURITY ----------------
-API_PASSWORD = "AI_German"
-
-def verify_password(x_api_key: str = Header(None)):
-    if x_api_key != API_PASSWORD:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-# ---------------- DB SETUP ----------------
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-Base = declarative_base()
-engine = None
-SessionLocal = None
-DB_READY = False
-DB_INIT_ERR = None
-
-try:
-    engine = create_engine(DATABASE_URL)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    DB_READY = True
-    logging.debug(f"✅ create_engine success, url={DATABASE_URL}")
-except Exception as e:
-    DB_INIT_ERR = str(e)
-    logging.error(f"❌ create_engine failed: {e}")
-
-class TradeLog(Base):
-    __tablename__ = "trade_logs"
-    id = Column(Integer, primary_key=True, index=True)
-    symbol = Column(String, index=True)
-    action = Column(String)
-    shares = Column(Integer)
-    price = Column(Float)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-
-def init_db():
-    global DB_READY, DB_INIT_ERR
-    if engine:
-        try:
-            Base.metadata.create_all(bind=engine)
-            DB_READY = True
-            logging.debug("✅ DB initialized")
-        except Exception as e:
-            DB_INIT_ERR = str(e)
-            logging.error(f"❌ DB init failed: {e}")
-
-if engine:
-    init_db()
-
-# ---------------- FASTAPI APP ----------------
+# ---------------- FASTAPI ----------------
 app = FastAPI(title="AI Portfolio Bot")
 
-# CORS для фронтенда
+# CORS — укажите ваш фронт
+origins = [
+    "https://wealth-dashboard-ai.lovable.app",
+    "http://localhost:3000"
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://wealth-dashboard-ai.lovable.app"],  # домен фронта
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- MIDDLEWARE LOGGING ----------------
+# ---------------- MIDDLEWARE: LOG ----------------
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    idem = hex(id(request))
-    logger.debug(f"➡️ {request.method} {request.url} (id={idem})")
+    idem = f"{request.method} {request.url.path}"
     start_time = time.time()
+    try:
+        response = await call_next(request)
+        process_time = (time.time() - start_time) * 1000
+        logger.info(f"{idem} completed_in={process_time:.2f}ms status={response.status_code}")
+        return response
+    except Exception as e:
+        logger.exception(f"ERROR in {idem}: {e}")
+        raise
 
-    response = await call_next(request)
+# ---------------- DB ----------------
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
-    process_time = (time.time() - start_time) * 1000
-    logger.debug(f"⬅️ {request.method} {request.url} "
-                 f"completed_in={process_time:.2f}ms status={response.status_code} (id={idem})")
-    return response
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    DB_READY = True
+    DB_INIT_ERR = None
+    logger.info("✅ DB initialized")
+except Exception as e:
+    DB_READY = False
+    DB_INIT_ERR = str(e)
+    logger.error(f"❌ DB init error: {e}")
 
 # ---------------- AUTH ----------------
-class AuthRequest(BaseModel):
-    password: str
+API_PASSWORD = "AI_German"
+
+def verify_password(x_api_key: Optional[str] = None):
+    if x_api_key != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 @app.post("/auth/check")
-def auth_check(data: AuthRequest):
-    """Проверка пароля для фронтенда"""
-    if data.password == API_PASSWORD:
+def auth_check(payload: dict):
+    password = payload.get("password")
+    if password == API_PASSWORD:
         return {"ok": True}
     return {"ok": False}
 
-# ---------------- SCHEMAS ----------------
-class OnboardRequest(BaseModel):
-    budget: float
-    risk_level: str
-    goals: str
-
-class PortfolioResponse(BaseModel):
-    assets: list
-    note: str
-
 # ---------------- HEALTH ----------------
-@app.get("/ping", tags=["health"])
+@app.get("/ping")
 def ping():
     return {"message": "pong"}
 
-@app.get("/health", tags=["health"])
+@app.get("/health")
 def health():
     return {
         "status": "ok",
@@ -123,77 +89,68 @@ def health():
         "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
     }
 
-@app.get("/", tags=["health"])
-def root():
-    return {"ok": True, "service": "ai-portfolio-bot"}
-
-# ---------------- BUSINESS ENDPOINTS ----------------
+# ---------------- ONBOARDING ----------------
 @app.post("/onboard", dependencies=[Depends(verify_password)])
-def onboard(req: OnboardRequest):
-    return {
-        "status": "ok",
-        "saved": req.dict()
-    }
+def onboard(data: dict, db: Session = Depends(SessionLocal)):
+    budget = data.get("budget")
+    risk = data.get("risk")
+    goals = data.get("goals")
+    logger.info(f"Onboarding: budget={budget}, risk={risk}, goals={goals}")
+    # тут можно сохранить в таблицу users
+    return {"status": "ok", "saved": True}
 
-@app.post("/portfolio/build", dependencies=[Depends(verify_password)])
-def build_portfolio(risk: str):
-    if risk == "low":
-        assets = ["BND", "VNQ", "VOO"]
-    elif risk == "medium":
-        assets = ["VOO", "QQQ", "IWM"]
-    else:
-        assets = ["SPY", "ARKK", "TSLA", "NVDA"]
-    return {"portfolio": assets}
-
+# ---------------- PORTFOLIO ----------------
 @app.get("/portfolio/holdings", dependencies=[Depends(verify_password)])
 def portfolio_holdings():
-    return {"holdings": ["AAPL", "MSFT", "GOOG"]}
+    holdings = [
+        {
+            "ticker": "AAPL",
+            "qty": 10,
+            "avg_price": 150.0,
+            "market_price": 155.0,
+            "market_value": 1550.0,
+            "ts": datetime.utcnow().isoformat()
+        },
+        {
+            "ticker": "MSFT",
+            "qty": 5,
+            "avg_price": 300.0,
+            "market_price": 305.0,
+            "market_value": 1525.0,
+            "ts": datetime.utcnow().isoformat()
+        },
+        {
+            "ticker": "GOOG",
+            "qty": 3,
+            "avg_price": 140.0,
+            "market_price": 142.5,
+            "market_value": 427.5,
+            "ts": datetime.utcnow().isoformat()
+        }
+    ]
+    return {"holdings": holdings}
 
+# ---------------- METRICS ----------------
+@app.post("/metrics/refresh", dependencies=[Depends(verify_password)])
+def metrics_refresh():
+    return {"status": "ok", "refreshed_at": datetime.utcnow().isoformat()}
+
+# ---------------- FORECAST ----------------
 @app.post("/forecast/price", dependencies=[Depends(verify_password)])
-def forecast_price(symbol: str, days: int = 5):
-    # Lazy import heavy libs
-    import pandas as pd
-    import numpy as np
-    import yfinance as yf
-    from sklearn.linear_model import LinearRegression
-
-    data = yf.download(symbol, period="6mo")
-    if data.empty:
-        raise HTTPException(status_code=400, detail="No data for symbol")
-    data = data.reset_index()
-    data["t"] = np.arange(len(data))
-    X = data[["t"]]
-    y = data["Close"]
-
-    model = LinearRegression().fit(X, y)
-
-    future_t = np.arange(len(data), len(data) + days).reshape(-1, 1)
-    preds = model.predict(future_t)
-
-    forecast = [{"day": i+1, "price": float(p)} for i, p in enumerate(preds)]
+def forecast_price(data: dict):
+    symbol = data.get("symbol", "AAPL")
+    days = data.get("days", 5)
+    forecast = [{"day": i+1, "predicted_price": 150 + i} for i in range(days)]
     return {"symbol": symbol, "forecast": forecast}
 
+# ---------------- ADVICE ----------------
+@app.post("/advice/ai", dependencies=[Depends(verify_password)])
+def advice_ai(data: dict):
+    return {
+        "advice": f"Based on your risk profile '{data.get('risk','medium')}', diversify into AAPL, MSFT, and GOOG."
+    }
+
+# ---------------- REPORT ----------------
 @app.get("/report/json", dependencies=[Depends(verify_password)])
 def report_json():
-    report = {"portfolio": ["AAPL", "TSLA"], "performance": {"return": 0.12, "volatility": 0.08}}
-    return JSONResponse(content=report)
-
-@app.get("/report/pdf", dependencies=[Depends(verify_password)])
-def report_pdf():
-    from reportlab.lib.pagesizes import letter
-    from reportlab.pdfgen import canvas
-
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    c.drawString(100, 750, "Portfolio Report")
-    c.drawString(100, 730, "Assets: AAPL, TSLA")
-    c.drawString(100, 710, "Return: 12%  |  Volatility: 8%")
-    c.save()
-
-    buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=report.pdf"})
-
-@app.get("/advice/ai", dependencies=[Depends(verify_password)])
-def advice_ai():
-    # Пока без OpenAI, заглушка
-    return {"advice": "Rebalance into more ETFs to reduce risk."}
+    return {"portfolio": []}
