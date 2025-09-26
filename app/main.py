@@ -1,329 +1,170 @@
-# app/main.py
 import os
-import math
-import time
 import json
-import httpx
-from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+import logging
+from typing import List, Dict, Any
 
+import yfinance as yf
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import httpx
+from openai import OpenAI
 
-app = FastAPI(title="WealthAI Simulator API")
+# ---------------- CONFIG ----------------
+API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -------------------------
-# CORS
-# -------------------------
+logging.basicConfig(level=logging.INFO)
+
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # для prod можно сузить до домена фронта
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------
-# ENV / Config
-# -------------------------
-API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
-
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-# торговый (account) API
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-# data API (цены/снапшоты)
-ALPACA_DATA_URL = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
-
-HEADERS_ALPACA = {
-    "APCA-API-KEY-ID": ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-}
-
-# -------------------------
-# In-memory store (MVP)
-# -------------------------
-STORE: Dict[str, Any] = {
-    "profile": None,     # будет словарь профиля
-    "holdings": [],      # список позиций {symbol, shares, price, timestamp}
-    "last_build": None,  # мета о последней сборке
-}
-
-# -------------------------
-# Helpers
-# -------------------------
+# ---------------- AUTH ----------------
 def check_api_key(request: Request):
-    api_key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+    api_key = request.headers.get("x-api-key")
     if api_key != API_PASSWORD:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# ---------------- DATA MODELS ----------------
+class OnboardRequest(BaseModel):
+    budget: float
+    risk_level: str
+    goals: str
+    micro_caps: bool = False
+    target_date: str = "2026-01-01"
 
-async def alpaca_get_json(url: str, headers: Dict[str, str]) -> Dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=headers)
-    # пытаемся распарсить JSON, если нет — вернём текст
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw_text": resp.text}
-    return {"status_code": resp.status_code, "data": data}
+class Position(BaseModel):
+    symbol: str
+    quantity: int
+    price: float
+    allocation: float
+    forecast: Dict[str, Any] = None
 
-async def fetch_prices_for(symbols: List[str]) -> Dict[str, float]:
+# ---------------- MEMORY STORAGE ----------------
+user_profiles: Dict[str, Any] = {}
+user_portfolios: Dict[str, List[Position]] = {}
+
+# ---------------- HELPERS ----------------
+def build_candidates(limit: int = 100) -> List[Dict[str, Any]]:
     """
-    Тянем цены из Alpaca Data API (snapshots).
-    Возвращаем dict {symbol: price}.
+    Собираем список кандидатов из S&P500 через yfinance с метриками.
     """
-    if not symbols:
-        return {}
-    # API ограничивает длину, на MVP — одним чанком до 200 тикеров
-    syms = ",".join(symbols[:200])
-    url = f"{ALPACA_DATA_URL}/v2/stocks/snapshots?symbols={syms}"
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=HEADERS_ALPACA)
-
-    if resp.status_code != 200:
-        # на всякий случай — «мягкая» ошибка
-        raise HTTPException(status_code=500, detail=f"Alpaca snapshots error {resp.status_code}: {resp.text}")
-
-    data = resp.json()
-    prices: Dict[str, float] = {}
-
-    # у Alpaca структура бывает {'snapshots': {SYMBOL: {...}}} либо просто {SYMBOL:{...}}
-    payload = data.get("snapshots", data)
-
-    for sym, snap in payload.items():
-        # пытаемся взять askPrice (latestQuote.ap) или последнюю цену трейда (latestTrade.p)
-        price = None
+    # Список тикеров S&P500 (yfinance Ticker '^GSPC' constituents пока нестабилен)
+    sp500 = yf.Ticker("^GSPC")
+    tickers = list(sp500.tickers.keys())[:limit] if hasattr(sp500, "tickers") else [
+        "AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "META", "NVDA", "JPM", "V", "JNJ"
+    ]
+    candidates = []
+    for sym in tickers:
         try:
-            price = snap.get("latestQuote", {}).get("ap")
-        except Exception:
-            pass
-        if not price:
-            try:
-                price = snap.get("latestTrade", {}).get("p")
-            except Exception:
-                pass
-        # запасной вариант — close из minute/prevDaily (если вернулся)
-        if not price:
-            try:
-                price = snap.get("prevDailyBar", {}).get("c")
-            except Exception:
-                pass
-
-        # фильтр
-        if price and isinstance(price, (int, float)) and price > 0:
-            prices[sym] = float(price)
-
-    return prices
-
-def portfolio_template_by_risk(risk_level: str, micro_caps: bool) -> Dict[str, float]:
-    """
-    Базовые веса по риску (ETF + крупные техи).
-    micro_caps=True добавляет малую долю IWM (small caps ETF) вместо «настоящих microcap».
-    """
-    risk = (risk_level or "").lower()
-    weights: Dict[str, float] = {}
-
-    if risk in ("conservative", "консервативный"):
-        weights = {
-            "SPY": 0.40,
-            "BND": 0.30,   # облигации (Vanguard Total Bond)
-            "QQQ": 0.10,
-            "AAPL": 0.07,
-            "MSFT": 0.07,
-            "VTI": 0.06,   # total market
-        }
-    elif risk in ("aggressive", "агрессивный"):
-        weights = {
-            "QQQ": 0.25,
-            "NVDA": 0.15,
-            "AAPL": 0.12,
-            "MSFT": 0.12,
-            "GOOGL": 0.10,
-            "AMZN": 0.10,
-            "META": 0.08,
-            "TSLA": 0.08,
-        }
-    else:  # balanced / сбалансированный
-        weights = {
-            "SPY": 0.25,
-            "QQQ": 0.15,
-            "VTI": 0.10,
-            "AAPL": 0.12,
-            "MSFT": 0.12,
-            "GOOGL": 0.10,
-            "AMZN": 0.08,
-            "META": 0.08,
-        }
-
-    if micro_caps:
-        # вместо настоящих microcap (для надёжности котировок) — добавим small-caps ETF
-        # берём 5% из SPY (или из крупнейшего веса)
-        take_from = max(weights, key=weights.get)
-        delta = min(0.05, weights[take_from] * 0.25)
-        weights[take_from] -= delta
-        weights["IWM"] = delta
-
-    # нормализация до 1.0 (на всякий)
-    total = sum(weights.values()) or 1.0
-    return {k: v / total for k, v in weights.items()}
-
-def allocate_shares(budget: float, weights: Dict[str, float], prices: Dict[str, float]) -> List[Dict[str, Any]]:
-    """
-    Раскладываем бюджет по весам, считаем целые лоты.
-    """
-    now = utc_now_iso()
-    result: List[Dict[str, Any]] = []
-    cash_left = budget
-
-    # сначала в порядке убывания веса, чтобы бОльшие доли получили шанс на округление
-    for sym, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
-        price = prices.get(sym)
-        if not price:
+            data = yf.Ticker(sym)
+            info = data.info
+            hist = data.history(period="3mo")
+            avg_vol = int(hist["Volume"].mean()) if not hist.empty else None
+            candidates.append({
+                "symbol": sym,
+                "price": info.get("currentPrice"),
+                "marketCap": info.get("marketCap"),
+                "beta": info.get("beta"),
+                "dividendYield": info.get("dividendYield"),
+                "volume": avg_vol
+            })
+        except Exception as e:
+            logging.warning(f"Ошибка для {sym}: {e}")
             continue
-        target_amount = budget * w
-        shares = int(target_amount // price)  # целые лоты
-        if shares <= 0:
-            continue
-        amount = shares * price
-        cash_left -= amount
-        result.append({
-            "symbol": sym,
-            "shares": shares,
-            "price": round(float(price), 4),
-            "timestamp": now
-        })
+    return [c for c in candidates if c.get("price")]
 
-    # если остался ощутимый кэш — докупим по крупнейшему ETF (SPY/QQQ/VTI)
-    if cash_left > 0:
-        for pick in ("SPY", "QQQ", "VTI"):
-            p = prices.get(pick)
-            if p and cash_left >= p:
-                extra = int(cash_left // p)
-                if extra > 0:
-                    result.append({
-                        "symbol": pick,
-                        "shares": extra,
-                        "price": round(float(p), 4),
-                        "timestamp": now
-                    })
-                    cash_left -= extra * p
-                    break
+def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Отправляем 100 кандидатов в OpenAI → получаем 5 лучших + прогнозы.
+    """
+    prompt = f"""
+    You are an investment AI.
+    From the following {len(candidates)} candidate stocks with metrics:
+    {json.dumps(candidates[:100], indent=2)}
 
-    return result
+    Select exactly 5 stocks fitting this profile:
+    - Risk: {profile['risk_level']}
+    - Goals: {profile['goals']}
+    - Micro caps allowed: {profile['micro_caps']}
 
-# -------------------------
-# Healthcheck (без ключа)
-# -------------------------
+    For each stock, also forecast price at {profile['target_date']}.
+
+    Return JSON:
+    {{
+      "selected": [
+        {{
+          "symbol": "AAPL",
+          "reason": "Strong large-cap growth",
+          "forecast": {{"target_date":"{profile['target_date']}","price":210}}
+        }}
+      ]
+    }}
+    """
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+    text = resp.choices[0].message.content.strip()
+    try:
+        return json.loads(text)["selected"]
+    except Exception as e:
+        logging.error(f"AI parse error: {e}, raw: {text}")
+        return []
+
+# ---------------- ROUTES ----------------
 @app.get("/ping")
 async def ping():
     return {"message": "pong"}
 
-# -------------------------
-# Onboarding (protected)
-# -------------------------
 @app.post("/onboard")
-async def onboard(request: Request):
+async def onboard(request: Request, body: OnboardRequest):
     check_api_key(request)
-    body = await request.json()
-    profile = {
-        "budget": float(body.get("budget", 5000)),
-        "risk_level": body.get("risk_level") or body.get("risk") or "balanced",
-        "goals": body.get("goals", "growth"),
-        "micro_caps": bool(body.get("micro_caps", False)),
-        "horizon": body.get("horizon", "6m"),       # 3m / 6m / 12m
-        "knowledge": body.get("knowledge", "basic") # basic / advanced
-    }
-    STORE["profile"] = profile
-    return {"status": "ok", "profile": profile}
+    user_profiles["profile"] = body.dict()
+    return {"status": "ok", "profile": user_profiles["profile"]}
 
-# -------------------------
-# Build portfolio (protected)
-# -------------------------
 @app.post("/portfolio/build")
-async def portfolio_build(request: Request):
+async def build_portfolio(request: Request):
     check_api_key(request)
-    body = await request.json()
+    profile = user_profiles.get("profile")
+    if not profile:
+        raise HTTPException(status_code=400, detail="Run /onboard first")
 
-    # профиль берём из STORE, но разрешаем override полями из body
-    profile = STORE.get("profile") or {}
-    budget = float(body.get("budget", profile.get("budget", 5000)))
-    risk_level = (body.get("risk_level") or body.get("risk") or profile.get("risk_level") or "balanced")
-    micro_caps = bool(body.get("micro_caps", profile.get("micro_caps", False)))
+    # 1. Кандидаты
+    candidates = build_candidates(limit=100)
 
-    # подбираем базовые веса
-    weights = portfolio_template_by_risk(risk_level, micro_caps)
+    # 2. AI выбор
+    selected = ai_select(candidates, profile)
 
-    # получаем цены
-    symbols = list(weights.keys())
-    prices = await fetch_prices_for(symbols)
+    # 3. Распределение бюджета
+    budget = profile["budget"]
+    if not selected:
+        return {"status": "error", "message": "AI did not return selection"}
 
-    # если какого-то символа нет в снапшоте — исключим из весов
-    available = {s: w for s, w in weights.items() if s in prices}
-    total_w = sum(available.values()) or 1.0
-    norm_weights = {s: w / total_w for s, w in available.items()}
+    alloc = budget / len(selected)
+    positions = []
+    for s in selected:
+        price = next((c["price"] for c in candidates if c["symbol"] == s["symbol"]), 100)
+        qty = int(alloc // price) if price else 0
+        positions.append(Position(
+            symbol=s["symbol"],
+            quantity=qty,
+            price=price,
+            allocation=round(alloc/budget, 2),
+            forecast=s.get("forecast")
+        ))
+    user_portfolios["portfolio"] = positions
+    return {"status": "ok", "portfolio": [p.dict() for p in positions]}
 
-    # считаем лоты
-    positions = allocate_shares(budget, norm_weights, prices)
-
-    STORE["holdings"] = positions
-    STORE["last_build"] = {
-        "budget": budget,
-        "risk_level": risk_level,
-        "micro_caps": micro_caps,
-        "built_at": utc_now_iso()
-    }
-
-    return {
-        "status": "ok",
-        "input": {"budget": budget, "risk_level": risk_level, "micro_caps": micro_caps},
-        "data": positions  # контракт как в ТЗ для /portfolio/holdings
-    }
-
-# -------------------------
-# Holdings (protected)
-# -------------------------
 @app.get("/portfolio/holdings")
-async def portfolio_holdings(request: Request):
+async def holdings(request: Request):
     check_api_key(request)
-    return {"data": STORE.get("holdings", [])}
-
-# -------------------------
-# Alpaca utils (без ключа — для отладки)
-# -------------------------
-@app.get("/alpaca/test")
-async def alpaca_test():
-    url = f"{ALPACA_BASE_URL}/v2/account"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=HEADERS_ALPACA)
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw_text": resp.text}
-    return {
-        "status_code": resp.status_code,
-        "url": url,
-        "headers_used": {
-            "APCA-API-KEY-ID": (ALPACA_API_KEY[:4] + "****") if ALPACA_API_KEY else None,
-            "APCA-API-SECRET-KEY": (ALPACA_SECRET_KEY[:4] + "****") if ALPACA_SECRET_KEY else None,
-        },
-        "data": data,
-    }
-
-@app.get("/alpaca/positions")
-async def alpaca_positions():
-    url = f"{ALPACA_BASE_URL}/v2/positions"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=HEADERS_ALPACA)
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw_text": resp.text}
-    return {
-        "status_code": resp.status_code,
-        "url": url,
-        "data": data,
-    }
+    portfolio = user_portfolios.get("portfolio", [])
+    return {"holdings": [p.dict() for p in portfolio]}
