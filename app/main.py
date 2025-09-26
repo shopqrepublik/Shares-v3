@@ -2,7 +2,7 @@ import logging
 import sys
 import os
 from datetime import datetime
-from typing import Optional, Any, List, Dict
+from typing import Any, List, Dict
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,7 +59,6 @@ def check_api_key(request: Request):
 # ---------------- HELPERS ----------------
 # Нормализатор любого «сырого» формата к контракту фронта
 def normalize_to_front_contract(raw: Any) -> List[Dict[str, Any]]:
-    # 1) достаём список
     if raw is None:
         items = []
     elif isinstance(raw, list):
@@ -70,11 +69,10 @@ def normalize_to_front_contract(raw: Any) -> List[Dict[str, Any]]:
         elif isinstance(raw.get("holdings"), list):
             items = raw["holdings"]
         else:
-            items = list(raw.values())  # например {"AAPL": {...}}
+            items = list(raw.values())
     else:
         items = []
 
-    # 2) маппим в {symbol, shares, price, timestamp}
     out: List[Dict[str, Any]] = []
     for h in items:
         symbol = (h.get("symbol") or h.get("ticker") or h.get("code") or "UNKNOWN")
@@ -111,7 +109,6 @@ def health():
 async def onboard(request: Request):
     check_api_key(request)
     data = await request.json()
-    # принимаем и risk_level, и risk (обратная совместимость)
     budget = data.get("budget")
     risk = data.get("risk_level") or data.get("risk")
     goals = data.get("goals")
@@ -127,7 +124,6 @@ def portfolio_holdings(request: Request):
     """
     check_api_key(request)
 
-    # здесь может быть загрузка из БД, сейчас — примерные данные
     legacy_holdings = [
         {
             "ticker": "AAPL",
@@ -155,10 +151,24 @@ def portfolio_holdings(request: Request):
         }
     ]
 
-    # нормализуем старый формат -> фронтовый контракт
     data = normalize_to_front_contract({"holdings": legacy_holdings})
-    # сохраняем в «текущий портфель» (по желанию)
     global CURRENT_HOLDINGS
     CURRENT_HOLDINGS = data
 
     return {"data": data}
+
+# ---------------- PORTFOLIO BUILD ----------------
+@app.post("/portfolio/build")
+async def build_portfolio(request: Request):
+    check_api_key(request)
+    data = await request.json()
+    budget = data.get("budget")
+    risk = data.get("risk_level") or data.get("risk")
+    goals = data.get("goals")
+    logger.info(f"Portfolio build request: {data}")
+    # временная заглушка
+    return {
+        "status": "ok",
+        "portfolio": ["AAPL", "MSFT", "GOOGL"],
+        "input": {"budget": budget, "risk": risk, "goals": goals}
+    }
