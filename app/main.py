@@ -20,14 +20,13 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
-url = f"{ALPACA_BASE_URL}/v2/account"
-
 
 # --- Helper ---
 def check_api_key(request: Request):
     api_key = request.headers.get("x-api-key")
     if api_key != API_PASSWORD:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # --- Healthcheck (без ключа) ---
 @app.get("/ping")
@@ -38,12 +37,13 @@ async def ping():
     """
     return {"message": "pong"}
 
-# --- Alpaca test (без авторизации) ---
+
+# --- Alpaca: Account info ---
 @app.get("/alpaca/test")
 async def alpaca_test():
     """
-    Проверка подключения к Alpaca.
-    Авторизация x-api-key отключена специально для отладки.
+    Проверка подключения к Alpaca. 
+    Возвращает данные аккаунта.
     """
     headers = {
         "APCA-API-KEY-ID": ALPACA_API_KEY,
@@ -67,10 +67,45 @@ async def alpaca_test():
                 "APCA-API-KEY-ID": (ALPACA_API_KEY[:4] + "****") if ALPACA_API_KEY else None,
                 "APCA-API-SECRET-KEY": (ALPACA_SECRET_KEY[:4] + "****") if ALPACA_SECRET_KEY else None,
             },
-            "data": data
+            "data": data,
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# --- Alpaca: Positions ---
+@app.get("/alpaca/positions")
+async def alpaca_positions():
+    """
+    Получение активных позиций из Alpaca.
+    """
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    }
+    url = f"{ALPACA_BASE_URL}/v2/positions"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=30)
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw_text": resp.text}
+
+        return {
+            "status_code": resp.status_code,
+            "url": url,
+            "headers_used": {
+                "APCA-API-KEY-ID": (ALPACA_API_KEY[:4] + "****") if ALPACA_API_KEY else None,
+                "APCA-API-SECRET-KEY": (ALPACA_SECRET_KEY[:4] + "****") if ALPACA_SECRET_KEY else None,
+            },
+            "data": data,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # --- Пример защищённого эндпоинта ---
 @app.get("/secure")
