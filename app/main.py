@@ -18,7 +18,10 @@ app.add_middleware(
 API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+url = f"{ALPACA_BASE_URL}/v2/account"
+
 
 # --- Helper ---
 def check_api_key(request: Request):
