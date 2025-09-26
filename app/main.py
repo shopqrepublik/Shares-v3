@@ -187,8 +187,11 @@ async def build_portfolio(request: Request):
 
 # --- alpaca test ---
 @app.get("/alpaca/test")
-async def alpaca_test(request: Request):
-    check_api_key(request)
+async def alpaca_test():
+    """
+    Временный эндпоинт для проверки подключения к Alpaca.
+    Здесь отключена проверка x-api-key, чтобы можно было тестировать прямо из браузера.
+    """
     headers = {
         "APCA-API-KEY-ID": ALPACA_API_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
@@ -196,4 +199,9 @@ async def alpaca_test(request: Request):
     url = f"{ALPACA_BASE_URL}/v2/account"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, headers=headers, timeout=30)
-    return {"status_code": resp.status_code, "data": resp.json()}
+
+    return {
+        "status_code": resp.status_code,
+        "data": resp.json()
+    }
+
