@@ -78,7 +78,6 @@ async def get_symbols_from_alpaca(headers):
 # Хелперы
 # ---------------------------------------
 async def get_snapshots(headers, symbols):
-    """Берем цены по части тикеров (например топ-200)"""
     symbols = symbols[:200]
     joined = ",".join(symbols)
     url = f"{ALPACA_BASE_URL.replace('paper-api','data')}/v2/stocks/snapshots?symbols={joined}"
@@ -98,7 +97,7 @@ async def get_snapshots(headers, symbols):
         return prices
 
 async def ask_openai_for_portfolio(budget, risk, goals, prices: dict):
-    symbols_subset = dict(list(prices.items())[:50])  # ограничим топ-50 для скорости
+    symbols_subset = dict(list(prices.items())[:50])
 
     prompt = f"""
 You are an investment assistant.
@@ -145,7 +144,7 @@ async def holdings(request: Request):
     check_api_key(request)
     return {"holdings": ["AAPL", "MSFT", "GOOG"]}
 
-# --- фиксы для совместимости ---
+# --- onboard ---
 @app.get("/onboard")
 async def onboard_get(request: Request):
     check_api_key(request)
@@ -159,23 +158,9 @@ async def onboard_get(request: Request):
 async def onboard_post(request: Request):
     check_api_key(request)
     body = await request.json()
-    budget = body.get("budget", 1000)
-    risk = body.get("risk", "balanced")
-    goals = body.get("goals", "growth")
-    horizon = body.get("horizon", "6m")
-    knowledge = body.get("knowledge", "novice")
+    return {"status": "ok", "input": body}
 
-    return {
-        "status": "ok",
-        "input": {
-            "budget": budget,
-            "risk": risk,
-            "goals": goals,
-            "horizon": horizon,
-            "knowledge": knowledge,
-        },
-    }
-
+# --- portfolio build ---
 @app.post("/portfolio/build")
 async def build_portfolio(request: Request):
     check_api_key(request)
@@ -199,3 +184,16 @@ async def build_portfolio(request: Request):
         "portfolio": ai_result.get("portfolio", []),
         "forecast": ai_result.get("forecast", {}),
     }
+
+# --- alpaca test ---
+@app.get("/alpaca/test")
+async def alpaca_test(request: Request):
+    check_api_key(request)
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    }
+    url = f"{ALPACA_BASE_URL}/v2/account"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, timeout=30)
+    return {"status_code": resp.status_code, "data": resp.json()}
