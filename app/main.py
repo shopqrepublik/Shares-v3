@@ -1,174 +1,172 @@
-import logging
-import sys
 import os
-from datetime import datetime
-from typing import Any, List, Dict
+import time
+import json
+import logging
+from typing import Optional
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, declarative_base
+from openai import AsyncOpenAI
 
-# ---------------- LOGGING ----------------
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+# ---------------------------------------
+# Логирование
+# ---------------------------------------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- FASTAPI ----------------
-app = FastAPI(title="AI Portfolio Bot")
+# ---------------------------------------
+# Конфиг
+# ---------------------------------------
+API_PASSWORD = os.getenv("API_PASSWORD") or os.getenv("VITE_API_KEY") or "AI_German"
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
-# CORS — фронт
-origins = [
-    "https://wealth-dashboard-ai.lovable.app",
-    "http://localhost:3000",
-    "http://localhost:5173",  # Vite dev-server
-]
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client_ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# ---------------------------------------
+# FastAPI init
+# ---------------------------------------
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],  # включает X-API-Key
+    allow_headers=["*"],
 )
 
-# ---------------- DB ----------------
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-try:
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    DB_READY = True
-    DB_INIT_ERR = None
-    logger.info("✅ DB initialized")
-except Exception as e:
-    DB_READY = False
-    DB_INIT_ERR = str(e)
-    logger.error(f"❌ DB init error: {e}")
-
-# ---------------- AUTH ----------------
-API_PASSWORD = os.getenv("API_PASSWORD") or os.getenv("VITE_API_KEY") or "AI_German"
-
+# ---------------------------------------
+# Авторизация
+# ---------------------------------------
 def check_api_key(request: Request):
     key = request.headers.get("x-api-key")
     if key != API_PASSWORD:
         logger.warning(f"Unauthorized request: x-api-key={key}")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# ---------------- HELPERS ----------------
-# Нормализатор любого «сырого» формата к контракту фронта
-def normalize_to_front_contract(raw: Any) -> List[Dict[str, Any]]:
-    if raw is None:
-        items = []
-    elif isinstance(raw, list):
-        items = raw
-    elif isinstance(raw, dict):
-        if isinstance(raw.get("data"), list):
-            items = raw["data"]
-        elif isinstance(raw.get("holdings"), list):
-            items = raw["holdings"]
-        else:
-            items = list(raw.values())
-    else:
-        items = []
+# ---------------------------------------
+# Кэш тикеров
+# ---------------------------------------
+ASSETS_CACHE = {"symbols": [], "last_update": 0}
 
-    out: List[Dict[str, Any]] = []
-    for h in items:
-        symbol = (h.get("symbol") or h.get("ticker") or h.get("code") or "UNKNOWN")
-        shares = h.get("shares", h.get("qty", 0)) or 0
-        price  = h.get("price",  h.get("market_price", 0.0)) or 0.0
-        ts     = h.get("timestamp") or h.get("ts") or datetime.utcnow().isoformat()
-        out.append({
-            "symbol": str(symbol),
-            "shares": float(shares),
-            "price": float(price),
-            "timestamp": str(ts),
-        })
-    return out
+async def get_symbols_from_alpaca(headers):
+    global ASSETS_CACHE
+    now = time.time()
+    if ASSETS_CACHE["symbols"] and (now - ASSETS_CACHE["last_update"] < 86400):
+        return ASSETS_CACHE["symbols"]
 
-# Простое хранилище текущего портфеля (в памяти)
-CURRENT_HOLDINGS: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{ALPACA_BASE_URL}/v2/assets",
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.error(f"Alpaca assets error {resp.status_code}: {resp.text}")
+            raise HTTPException(status_code=500, detail="Failed to fetch assets")
 
-# ---------------- HEALTH ----------------
+        assets = resp.json()
+        symbols = [a["symbol"] for a in assets if a["status"] == "active" and a["tradable"]]
+        ASSETS_CACHE = {"symbols": symbols, "last_update": now}
+        logger.info(f"Fetched {len(symbols)} symbols from Alpaca")
+        return symbols
+
+# ---------------------------------------
+# Хелперы
+# ---------------------------------------
+async def get_snapshots(headers, symbols):
+    """Берем цены по части тикеров (например топ-200)"""
+    # Alpaca ограничивает длину запроса → разобьем пакетами
+    symbols = symbols[:200]
+    joined = ",".join(symbols)
+    url = f"{ALPACA_BASE_URL.replace('paper-api','data')}/v2/stocks/snapshots?symbols={joined}"
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            logger.error(f"Alpaca snapshots error {resp.status_code}: {resp.text}")
+            raise HTTPException(status_code=500, detail="Failed to fetch snapshots")
+        data = resp.json()
+        prices = {}
+        for sym, val in data.items():
+            try:
+                prices[sym] = val["latestQuote"]["ap"]
+            except Exception:
+                continue
+        return prices
+
+async def ask_openai_for_portfolio(budget, risk, goals, prices: dict):
+    symbols_subset = dict(list(prices.items())[:50])  # ограничим топ-50 по цене для скорости
+
+    prompt = f"""
+You are an investment assistant.
+Task: Build a stock portfolio and provide forecast returns.
+
+Budget: {budget} USD
+Risk profile: {risk}
+Goals: {goals}
+
+Available symbols and prices (JSON): {json.dumps(symbols_subset)}
+
+Return JSON only in this format:
+{{
+  "portfolio":[{{"symbol":"AAPL","shares":5,"avg_price":170}}],
+  "forecast":{{"3m":"+5%","6m":"+12%","12m":"+25%"}}
+}}
+"""
+    resp = await client_ai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": "You are an expert financial analyst."},
+                  {"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=800
+    )
+    content = resp.choices[0].message.content.strip()
+    try:
+        data = json.loads(content)
+    except Exception:
+        logger.warning(f"Failed to parse AI response: {content}")
+        raise HTTPException(status_code=500, detail="AI response parse error")
+    return data
+
+# ---------------------------------------
+# Эндпоинты
+# ---------------------------------------
 @app.get("/ping")
-def ping():
+async def ping():
     return {"message": "pong"}
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "service": "ai-portfolio-bot",
-        "db_ready": DB_READY,
-        "db_error": (DB_INIT_ERR[:500] if DB_INIT_ERR else None),
-    }
-
-# ---------------- ONBOARDING ----------------
-@app.post("/onboard")
-async def onboard(request: Request):
-    check_api_key(request)
-    data = await request.json()
-    budget = data.get("budget")
-    risk = data.get("risk_level") or data.get("risk")
-    goals = data.get("goals")
-    logger.info(f"Onboarding received: {data}")
-    return {"status": "ok", "saved": True, "data": {"budget": budget, "risk_level": risk, "goals": goals}}
-
-# ---------------- PORTFOLIO ----------------
 @app.get("/portfolio/holdings")
-def portfolio_holdings(request: Request):
-    """
-    ВАЖНО: возвращаем строго контракт фронта:
-      {"data":[{"symbol","shares","price","timestamp"}]}
-    """
+async def holdings(request: Request):
     check_api_key(request)
+    # Заглушка — список текущих холдингов
+    return {"holdings": ["AAPL", "MSFT", "GOOG"]}
 
-    legacy_holdings = [
-        {
-            "ticker": "AAPL",
-            "qty": 10,
-            "avg_price": 150.0,
-            "market_price": 155.0,
-            "market_value": 1550.0,
-            "ts": datetime.utcnow().isoformat()
-        },
-        {
-            "ticker": "MSFT",
-            "qty": 5,
-            "avg_price": 300.0,
-            "market_price": 305.0,
-            "market_value": 1525.0,
-            "ts": datetime.utcnow().isoformat()
-        },
-        {
-            "ticker": "GOOG",
-            "qty": 3,
-            "avg_price": 140.0,
-            "market_price": 142.5,
-            "market_value": 427.5,
-            "ts": datetime.utcnow().isoformat()
-        }
-    ]
-
-    data = normalize_to_front_contract({"holdings": legacy_holdings})
-    global CURRENT_HOLDINGS
-    CURRENT_HOLDINGS = data
-
-    return {"data": data}
-
-# ---------------- PORTFOLIO BUILD ----------------
 @app.post("/portfolio/build")
 async def build_portfolio(request: Request):
     check_api_key(request)
-    data = await request.json()
-    budget = data.get("budget")
-    risk = data.get("risk_level") or data.get("risk")
-    goals = data.get("goals")
-    logger.info(f"Portfolio build request: {data}")
-    # временная заглушка
+    body = await request.json()
+    budget = body.get("budget", 10000)
+    risk = body.get("risk", "balanced")
+    goals = body.get("goals", "growth")
+
+    headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
+
+    # шаг 1: список тикеров
+    symbols = await get_symbols_from_alpaca(headers)
+
+    # шаг 2: цены (срез 200 тикеров)
+    prices = await get_snapshots(headers, symbols)
+
+    # шаг 3: AI строит портфель и прогноз
+    ai_result = await ask_openai_for_portfolio(budget, risk, goals, prices)
+
     return {
         "status": "ok",
-        "portfolio": ["AAPL", "MSFT", "GOOGL"],
-        "input": {"budget": budget, "risk": risk, "goals": goals}
+        "input": {"budget": budget, "risk": risk, "goals": goals},
+        "portfolio": ai_result.get("portfolio", []),
+        "forecast": ai_result.get("forecast", {})
     }
