@@ -26,17 +26,20 @@ def check_api_key(request: Request):
     if api_key != API_PASSWORD:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# --- Root test ---
+# --- Healthcheck (без ключа) ---
 @app.get("/ping")
-async def ping(request: Request):
-    check_api_key(request)
+async def ping():
+    """
+    Healthcheck для Railway. 
+    Доступен без x-api-key.
+    """
     return {"message": "pong"}
 
 # --- Alpaca test (без авторизации) ---
 @app.get("/alpaca/test")
 async def alpaca_test():
     """
-    Проверка подключения к Alpaca. 
+    Проверка подключения к Alpaca.
     Авторизация x-api-key отключена специально для отладки.
     """
     headers = {
@@ -65,3 +68,13 @@ async def alpaca_test():
         }
     except Exception as e:
         return {"error": str(e)}
+
+# --- Пример защищённого эндпоинта ---
+@app.get("/secure")
+async def secure_example(request: Request):
+    """
+    Пример защищённого эндпоинта.
+    Требует заголовок x-api-key.
+    """
+    check_api_key(request)
+    return {"status": "ok", "message": "This is a protected endpoint"}
