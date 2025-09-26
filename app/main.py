@@ -48,7 +48,7 @@ except Exception as e:
     logger.error(f"❌ DB init error: {e}")
 
 # ---------------- AUTH ----------------
-API_PASSWORD = os.getenv("API_PASSWORD", "AI_German")
+API_PASSWORD = os.getenv("API_PASSWORD") or os.getenv("VITE_API_KEY") or "AI_German"
 
 def check_api_key(request: Request):
     key = request.headers.get("x-api-key")
