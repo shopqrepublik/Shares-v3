@@ -21,8 +21,9 @@ matplotlib==3.9.2
 mplfinance==0.12.10b0
 reportlab==4.2.5
 
-# OpenAI SDK (для AI-советов)
+# OpenAI SDK (AI)
 openai==1.51.2
+httpx==0.27.0   # 🔑 зафиксировали, чтобы не ломался AsyncOpenAI
 
 # (опционально) LSTM на CPU
 torch==2.4.1+cpu
