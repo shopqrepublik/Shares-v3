@@ -79,7 +79,6 @@ async def get_symbols_from_alpaca(headers):
 # ---------------------------------------
 async def get_snapshots(headers, symbols):
     """Берем цены по части тикеров (например топ-200)"""
-    # Alpaca ограничивает длину запроса → разобьем пакетами
     symbols = symbols[:200]
     joined = ",".join(symbols)
     url = f"{ALPACA_BASE_URL.replace('paper-api','data')}/v2/stocks/snapshots?symbols={joined}"
@@ -99,7 +98,7 @@ async def get_snapshots(headers, symbols):
         return prices
 
 async def ask_openai_for_portfolio(budget, risk, goals, prices: dict):
-    symbols_subset = dict(list(prices.items())[:50])  # ограничим топ-50 по цене для скорости
+    symbols_subset = dict(list(prices.items())[:50])  # ограничим топ-50 для скорости
 
     prompt = f"""
 You are an investment assistant.
@@ -119,10 +118,12 @@ Return JSON only in this format:
 """
     resp = await client_ai.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "system", "content": "You are an expert financial analyst."},
-                  {"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "You are an expert financial analyst."},
+            {"role": "user", "content": prompt},
+        ],
         temperature=0.3,
-        max_tokens=800
+        max_tokens=800,
     )
     content = resp.choices[0].message.content.strip()
     try:
@@ -142,8 +143,38 @@ async def ping():
 @app.get("/portfolio/holdings")
 async def holdings(request: Request):
     check_api_key(request)
-    # Заглушка — список текущих холдингов
     return {"holdings": ["AAPL", "MSFT", "GOOG"]}
+
+# --- фиксы для совместимости ---
+@app.get("/onboard")
+async def onboard_get(request: Request):
+    check_api_key(request)
+    return {
+        "status": "ok",
+        "message": "GET /onboard is deprecated, please use POST /onboard",
+        "compat": True,
+    }
+
+@app.post("/onboard")
+async def onboard_post(request: Request):
+    check_api_key(request)
+    body = await request.json()
+    budget = body.get("budget", 1000)
+    risk = body.get("risk", "balanced")
+    goals = body.get("goals", "growth")
+    horizon = body.get("horizon", "6m")
+    knowledge = body.get("knowledge", "novice")
+
+    return {
+        "status": "ok",
+        "input": {
+            "budget": budget,
+            "risk": risk,
+            "goals": goals,
+            "horizon": horizon,
+            "knowledge": knowledge,
+        },
+    }
 
 @app.post("/portfolio/build")
 async def build_portfolio(request: Request):
@@ -153,20 +184,18 @@ async def build_portfolio(request: Request):
     risk = body.get("risk", "balanced")
     goals = body.get("goals", "growth")
 
-    headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    }
 
-    # шаг 1: список тикеров
     symbols = await get_symbols_from_alpaca(headers)
-
-    # шаг 2: цены (срез 200 тикеров)
     prices = await get_snapshots(headers, symbols)
-
-    # шаг 3: AI строит портфель и прогноз
     ai_result = await ask_openai_for_portfolio(budget, risk, goals, prices)
 
     return {
         "status": "ok",
         "input": {"budget": budget, "risk": risk, "goals": goals},
         "portfolio": ai_result.get("portfolio", []),
-        "forecast": ai_result.get("forecast", {})
+        "forecast": ai_result.get("forecast", {}),
     }
