@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import yfinance as yf
 from fastapi import FastAPI, Request, HTTPException
@@ -38,6 +38,8 @@ class OnboardRequest(BaseModel):
     goals: str
     micro_caps: bool = False
     target_date: str = "2026-01-01"
+    horizon: Optional[str] = None       # добавлено
+    experience: Optional[str] = None    # добавлено
 
 class Position(BaseModel):
     symbol: str
@@ -55,13 +57,12 @@ def build_candidates(limit: int = 100) -> List[Dict[str, Any]]:
     """
     Собираем список кандидатов из S&P500 через yfinance с метриками.
     """
-    # Список тикеров S&P500 (yfinance Ticker '^GSPC' constituents пока нестабилен)
-    sp500 = yf.Ticker("^GSPC")
-    tickers = list(sp500.tickers.keys())[:limit] if hasattr(sp500, "tickers") else [
-        "AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "META", "NVDA", "JPM", "V", "JNJ"
+    tickers = [
+        "AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "META", "NVDA", "JPM", "V", "JNJ",
+        "PG", "HD", "DIS", "NFLX", "KO", "PEP", "XOM", "CVX", "BA", "IBM"
     ]
     candidates = []
-    for sym in tickers:
+    for sym in tickers[:limit]:
         try:
             data = yf.Ticker(sym)
             info = data.info
@@ -82,7 +83,7 @@ def build_candidates(limit: int = 100) -> List[Dict[str, Any]]:
 
 def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Отправляем 100 кандидатов в OpenAI → получаем 5 лучших + прогнозы.
+    Отправляем кандидатов в OpenAI → получаем 5 лучших + прогнозы.
     """
     prompt = f"""
     You are an investment AI.
@@ -90,11 +91,13 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
     {json.dumps(candidates[:100], indent=2)}
 
     Select exactly 5 stocks fitting this profile:
-    - Risk: {profile['risk_level']}
-    - Goals: {profile['goals']}
-    - Micro caps allowed: {profile['micro_caps']}
+    - Risk: {profile.get('risk_level')}
+    - Goals: {profile.get('goals')}
+    - Micro caps allowed: {profile.get('micro_caps')}
+    - Horizon: {profile.get('horizon')}
+    - Experience: {profile.get('experience')}
 
-    For each stock, also forecast price at {profile['target_date']}.
+    For each stock, also forecast price at {profile.get('target_date')}.
 
     Return JSON:
     {{
@@ -102,7 +105,7 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
         {{
           "symbol": "AAPL",
           "reason": "Strong large-cap growth",
-          "forecast": {{"target_date":"{profile['target_date']}","price":210}}
+          "forecast": {{"target_date":"{profile.get('target_date')}","price":210}}
         }}
       ]
     }}
