@@ -1,174 +1,134 @@
 import os
-import json
 import logging
-from typing import List, Dict, Any, Optional
+import json
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import OpenAI
+from typing import Dict, Any, List
 
-# ---------------- CONFIG ----------------
-API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+from app.routers.portfolio import build_portfolio as build_core
+from openai import AsyncOpenAI
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Логирование
 logging.basicConfig(level=logging.INFO)
 
+# Инициализация
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ---------------- AUTH ----------------
-def check_api_key(request: Request):
-    api_key = request.headers.get("x-api-key")
-    if api_key != API_PASSWORD:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+# Хранилище в памяти
+USER_PROFILE: Dict[str, Any] = {}
+CURRENT_PORTFOLIO: List[Dict[str, Any]] = []
 
-# ---------------- DATA MODELS ----------------
+# Конфиги
+API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
+
+# -------------------- Модели --------------------
+
 class OnboardRequest(BaseModel):
     budget: float
     risk_level: str
     goals: str
-    micro_caps: bool = False
-    target_date: str = "2026-01-01"
-    horizon: Optional[str] = None
-    experience: Optional[str] = None
+    horizon: str = ""
+    experience: str = ""
 
-# ---------------- MEMORY STORAGE ----------------
-user_profiles: Dict[str, Any] = {}
-user_portfolios: Dict[str, List[Dict[str, Any]]] = {}
+# -------------------- Вспомогательные --------------------
 
-# ---------------- AI ANNOTATION ----------------
-def ai_annotate(selected: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """AI добавляет прогноз и объяснение к уже выбранным акциям"""
+def check_api_key(request: Request):
+    api_key = request.headers.get("X-API-Key")
+    if api_key != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# -------------------- AI-аннотации --------------------
+
+async def ai_annotate(candidates: List[Dict[str, Any]], profile: Dict[str, Any]):
     prompt = f"""
-    You are an investment assistant.
-    For the following 5 selected stocks:
-    {json.dumps(selected, indent=2)}
+    Пользовательский профиль:
+    - Бюджет: {profile.get("budget")}
+    - Риск-профиль: {profile.get("risk_level")}
+    - Цели: {profile.get("goals")}
+    - Горизонт: {profile.get("horizon")}
+    - Опыт: {profile.get("experience")}
 
-    User profile:
-    - Risk: {profile.get('risk_level')}
-    - Goals: {profile.get('goals')}
-    - Horizon: {profile.get('horizon')}
-    - Experience: {profile.get('experience')}
+    Вот список акций для портфеля:
+    {json.dumps(candidates, indent=2, ensure_ascii=False)}
 
-    For each stock, provide:
-    - reason (short explanation why it fits profile)
-    - forecast (expected price at {profile.get('target_date')})
+    Для каждой акции добавь:
+    - reason: короткое объяснение (1–2 предложения)
+    - forecast: JSON с target_date и ожидаемой ценой price
 
-    Return ONLY valid JSON:
-    {{
-      "annotated": [
-        {{
-          "symbol": "AAPL",
-          "reason": "Large-cap stability with growth",
-          "forecast": {{"target_date": "{profile.get('target_date')}", "price": 210}}
-        }}
-      ]
-    }}
+    Верни JSON-массив, пример:
+    [
+      {"symbol": "AAPL", "reason": "устойчивый рост", "forecast": {"target_date": "2025-12-31", "price": 250}}
+    ]
     """
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
-    )
-    text = resp.choices[0].message.content.strip()
-    logging.info(f"[AI RAW OUTPUT] {text}")
-    try:
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        parsed = json.loads(text)["annotated"]
-        logging.info(f"[AI PARSED] {parsed}")
-        return parsed
-    except Exception as e:
-        logging.error(f"AI parse error: {e}, raw: {text}")
-        return []
 
-# ---------------- ROUTES ----------------
-@app.get("/ping")
-async def ping():
-    return {"message": "pong"}
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": "Ты — финансовый аналитик."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        text = resp.choices[0].message.content.strip()
+        logging.info(f"[AI RAW OUTPUT] {text}")
+
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            enriched = []
+            for cand in candidates:
+                match = next((x for x in parsed if x.get("symbol") == cand["symbol"]), {})
+                cand["reason"] = match.get("reason", "")
+                cand["forecast"] = match.get("forecast", {})
+                enriched.append(cand)
+            logging.info(f"[AI PARSED] {enriched}")
+            return enriched
+    except Exception as e:
+        logging.error(f"AI annotate failed: {e}")
+
+    return candidates
+
+# -------------------- Маршруты --------------------
+
+@app.post("/onboard")
+async def onboard(req: OnboardRequest, request: Request):
+    check_api_key(request)
+    global USER_PROFILE
+    USER_PROFILE = req.dict()
+    logging.info(f"[ONBOARD] {USER_PROFILE}")
+    return {"status": "ok", "profile": USER_PROFILE}
+
+@app.post("/portfolio/build")
+async def build_portfolio(request: Request):
+    check_api_key(request)
+    profile = USER_PROFILE or {"budget": 1000, "risk_level": "medium", "goals": "grow"}
+
+    # получаем кандидатов из core
+    candidates = build_core(profile)
+    logging.info(f"[CANDIDATES] {candidates}")
+
+    # аннотация AI
+    enriched = await ai_annotate(candidates, profile)
+
+    # ✅ сохраняем глобально
+    global CURRENT_PORTFOLIO
+    CURRENT_PORTFOLIO = enriched
+
+    return {"holdings": enriched}
+
+@app.get("/portfolio/holdings")
+async def get_holdings(request: Request):
+    check_api_key(request)
+    return {"holdings": CURRENT_PORTFOLIO}
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
     check_api_key(request)
     return {
-        "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
-        "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing"
+        "ALPACA_API_KEY": "set" if os.getenv("ALPACA_API_KEY") else "missing",
+        "ALPACA_API_SECRET": "set" if os.getenv("ALPACA_API_SECRET") else "missing",
+        "OPENAI_API_KEY": "set" if os.getenv("OPENAI_API_KEY") else "missing",
     }
 
-@app.post("/onboard")
-async def onboard(request: Request, body: OnboardRequest):
-    check_api_key(request)
-    user_profiles["profile"] = body.dict()
-    logging.info(f"[ONBOARD] {user_profiles['profile']}")
-    return {"status": "ok", "profile": user_profiles["profile"]}
-
-@app.post("/portfolio/build")
-async def build_portfolio(request: Request):
-    check_api_key(request)
-    profile = user_profiles.get("profile")
-    if not profile:
-        raise HTTPException(status_code=400, detail="Run /onboard first")
-
-    # 1. Берём готовый top-5 из app/routers/portfolio.py
-    from app.routers.portfolio import build_portfolio as build_core
-    holdings_resp = build_core()
-    selected = holdings_resp["data"]
-
-    if not selected:
-        return {"status": "error", "message": "No holdings built"}
-
-    logging.info("[METRICS RESULT] Отобранные бумаги по метрикам:")
-    for s in selected:
-        logging.info(f"  {s['symbol']} — price={s['price']}, score={s.get('score')}")
-
-    # 2. Обогащаем через AI (reason + forecast)
-    annotated = ai_annotate(selected, profile)
-
-    logging.info("[AI ANNOTATION] Прогнозы AI:")
-    for a in annotated:
-        logging.info(f"  {a['symbol']} — reason={a.get('reason')}, forecast={a.get('forecast')}")
-
-    # 3. Объединяем данные
-    budget = profile["budget"]
-    alloc = budget / len(selected)
-
-    enriched = []
-    for s in selected:
-        extra = next((a for a in annotated if a["symbol"] == s["symbol"]), {})
-        qty = int(alloc // s["price"]) if s["price"] else 0
-        enriched.append({
-            "symbol": s["symbol"],
-            "price": s["price"],
-            "score": s.get("score"),
-            "momentum": s.get("momentum"),
-            "forecast_metric": s.get("forecast"),
-            "pattern": s.get("pattern"),
-            "quantity": qty,
-            "allocation": round(alloc/budget, 2),
-            "reason": extra.get("reason"),
-            "forecast": extra.get("forecast")
-        })
-
-    user_portfolios["portfolio"] = enriched
-    logging.info("[PORTFOLIO BUILT] Итоговый портфель:")
-    for p in enriched:
-        logging.info(f"  {p['symbol']} — qty={p['quantity']}, alloc={p['allocation']}, score={p['score']}")
-
-    return {"status": "ok", "portfolio": enriched}
-
-@app.get("/portfolio/holdings")
-async def holdings(request: Request):
-    check_api_key(request)
-    portfolio = user_portfolios.get("portfolio", [])
-    return {"holdings": portfolio}
-
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
