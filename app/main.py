@@ -135,8 +135,16 @@ async def build_portfolio(request: Request):
     if not selected:
         return {"status": "error", "message": "No holdings built"}
 
+    logging.info("[METRICS RESULT] Отобранные бумаги по метрикам:")
+    for s in selected:
+        logging.info(f"  {s['symbol']} — price={s['price']}, score={s.get('score')}")
+
     # 2. Обогащаем через AI (reason + forecast)
     annotated = ai_annotate(selected, profile)
+
+    logging.info("[AI ANNOTATION] Прогнозы AI:")
+    for a in annotated:
+        logging.info(f"  {a['symbol']} — reason={a.get('reason')}, forecast={a.get('forecast')}")
 
     # 3. Объединяем данные
     positions = []
@@ -156,7 +164,10 @@ async def build_portfolio(request: Request):
         ))
 
     user_portfolios["portfolio"] = positions
-    logging.info(f"[PORTFOLIO BUILT] {positions}")
+    logging.info("[PORTFOLIO BUILT] Итоговый портфель:")
+    for p in positions:
+        logging.info(f"  {p.symbol} — qty={p.quantity}, alloc={p.allocation}, forecast={p.forecast}")
+
     return {"status": "ok", "portfolio": [p.dict() for p in positions]}
 
 @app.get("/portfolio/holdings")
