@@ -1,13 +1,11 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from math import floor
 import logging, os, requests
-
-import yfinance as yf
-import pandas as pd
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import LinearRegression
 
 log = logging.getLogger(__name__)
@@ -33,39 +31,18 @@ class HoldingsResponse(BaseModel):
 CURRENT_HOLDINGS: List[Dict[str, Any]] = []
 
 # -----------------------------
-# Нормализация к фронтовому контракту
-# -----------------------------
-def normalize_to_front_contract(raw: Any) -> List[Dict[str, Any]]:
-    if raw is None:
-        items = []
-    elif isinstance(raw, list):
-        items = raw
-    elif isinstance(raw, dict):
-        items = raw.get("data", []) or raw.get("holdings", []) or list(raw.values())
-    else:
-        items = []
-
-    out: List[Dict[str, Any]] = []
-    for h in items:
-        out.append({
-            "symbol": str(h.get("symbol") or h.get("ticker") or "UNKNOWN"),
-            "shares": float(h.get("shares", h.get("qty", 0)) or 0),
-            "price": float(h.get("price", h.get("market_price", 0.0)) or 0.0),
-            "timestamp": str(h.get("timestamp") or h.get("ts") or datetime.utcnow().isoformat()),
-            "score": float(h.get("score")) if h.get("score") is not None else None
-        })
-    return out
-
-# -----------------------------
-# Вспомогательные функции
+# Alpaca API конфиг
 # -----------------------------
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET")
 ALPACA_API_URL = "https://paper-api.alpaca.markets"
-FMP_API_KEY = os.getenv("FMP_API_KEY")
+ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
 
+# -----------------------------
+# Вспомогательные функции
+# -----------------------------
 def get_assets(limit=200):
-    """Список активов с Alpaca (ограничим 200 для MVP)."""
+    """Берем список активов с Alpaca (ограничим для MVP)."""
     try:
         r = requests.get(f"{ALPACA_API_URL}/v2/assets", headers={
             "APCA-API-KEY-ID": ALPACA_API_KEY,
@@ -79,42 +56,70 @@ def get_assets(limit=200):
         log.warning("Assets fetch failed: %s", e)
         return ["AAPL","MSFT","SPY","QQQ"]  # fallback
 
-def get_mktcap(symbol):
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey={FMP_API_KEY}"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if isinstance(data, list) and len(data)>0:
-            return data[0].get("mktCap",0)
-    except Exception:
-        return 0
-    return 0
+def get_bars(symbol: str, days: int = 180):
+    """Загрузка дневных баров через Alpaca Market Data API v2"""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    url = f"{ALPACA_DATA_URL}/stocks/{symbol}/bars"
+    params = {
+        "timeframe": "1Day",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "limit": days
+    }
+    r = requests.get(url, headers={
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_API_SECRET
+    }, params=params, timeout=20)
+    if r.status_code != 200:
+        return []
+    return r.json().get("bars", [])
 
-def forecast_linear(df: pd.DataFrame, days=30):
-    if df.empty: return 0
-    closes = df["Close"].values
-    if len(closes) < 20: return 0
-    X = np.arange(len(closes)).reshape(-1,1)
+def compute_metrics(bars: list):
+    if not bars or len(bars) < 20:
+        return None
+    
+    df = pd.DataFrame(bars)
+    df["t"] = pd.to_datetime(df["t"])
+    df.set_index("t", inplace=True)
+
+    # Momentum (3 месяца ~ 60 дней)
+    mom = (df["c"].iloc[-1] / df["c"].iloc[-60]) - 1 if len(df) > 60 else 0
+
+    # Volume spike
+    vol_spike = df["v"].iloc[-1] / df["v"].tail(20).mean()
+
+    # Forecast (линейная регрессия на последних N дней)
+    closes = df["c"].values
+    X = np.arange(len(closes)).reshape(-1, 1)
     y = closes
-    model = LinearRegression().fit(X,y)
-    future_x = np.arange(len(closes), len(closes)+days).reshape(-1,1)
+    model = LinearRegression().fit(X, y)
+    future_x = np.arange(len(closes), len(closes)+30).reshape(-1, 1)
     preds = model.predict(future_x)
-    return (preds[-1] - closes[-1]) / closes[-1]
+    forecast = (preds[-1] - closes[-1]) / closes[-1]
 
-def detect_pattern(df: pd.DataFrame):
-    if len(df)<2: return 0
-    prev, last = df.iloc[-2], df.iloc[-1]
-    if (last["Close"]>last["Open"] and prev["Close"]<prev["Open"] 
-        and last["Close"]>prev["Open"] and last["Open"]<prev["Close"]):
-        return 1
-    return 0
+    # Простейший паттерн (Bullish Engulfing)
+    pattern = 0
+    if len(df) >= 2:
+        prev, last = df.iloc[-2], df.iloc[-1]
+        if (last["c"] > last["o"] and prev["c"] < prev["o"] 
+            and last["c"] > prev["o"] and last["o"] < prev["c"]):
+            pattern = 1
+
+    return {
+        "momentum": mom,
+        "vol_spike": vol_spike,
+        "forecast": forecast,
+        "pattern": pattern,
+        "last_price": df["c"].iloc[-1]
+    }
 
 # -----------------------------
 # /holdings
 # -----------------------------
 @router.get("/holdings", response_model=HoldingsResponse)
 def get_holdings():
-    return {"data": normalize_to_front_contract({"data": CURRENT_HOLDINGS})}
+    return {"data": CURRENT_HOLDINGS}
 
 # -----------------------------
 # /build
@@ -130,31 +135,34 @@ def build_portfolio(body: Optional[BuildRequest] = None):
 
     budget_val = float(body.budget if body else 1000.0)
 
-    symbols = get_assets(limit=100)
+    symbols = get_assets(limit=50)  # ограничим 50 для скорости
     scored = []
 
     for sym in symbols:
         try:
-            df = yf.download(sym, period="6mo", interval="1d", progress=False)
-            if df.empty: continue
-            mom = (df["Close"].iloc[-1] / df["Close"].iloc[max(0,-60)]) - 1
-            vol_spike = df["Volume"].iloc[-1] / df["Volume"].tail(20).mean()
-            forecast = forecast_linear(df, days=30)
-            pattern = detect_pattern(df)
-            score = 0.4*mom + 0.2*vol_spike + 0.3*forecast + 0.1*pattern
-            scored.append((sym, score, df["Close"].iloc[-1]))
-        except Exception:
+            bars = get_bars(sym, days=180)
+            metrics = compute_metrics(bars)
+            if not metrics:
+                continue
+            score = (0.4*metrics["momentum"] 
+                     + 0.2*metrics["vol_spike"] 
+                     + 0.3*metrics["forecast"] 
+                     + 0.1*metrics["pattern"])
+            scored.append((sym, score, metrics["last_price"]))
+        except Exception as e:
+            log.warning("Metrics failed for %s: %s", sym, e)
             continue
 
+    # Берем top-5
     top = sorted(scored, key=lambda x:x[1], reverse=True)[:5]
 
     holdings: List[Dict[str,Any]] = []
     now_iso = datetime.now(timezone.utc).isoformat()
-    per_bucket = budget_val/max(1,len(top))
+    per_bucket = budget_val / max(1, len(top))
 
     for sym,score,px in top:
         qty = floor(per_bucket/px) if px>0 else 0
-        if qty<=0: qty=1
+        if qty <= 0: qty = 1
         holdings.append({
             "symbol": sym,
             "shares": float(qty),
@@ -167,20 +175,32 @@ def build_portfolio(body: Optional[BuildRequest] = None):
     return {"data": holdings}
 
 # -----------------------------
-# /track (оставляем как было)
+# /track (пока через Alpaca bars для SPY и тикеров)
 # -----------------------------
 @router.get("/track")
 def track_portfolio(symbols: str, benchmark: str="SPY", days: int=365):
     tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-    end = datetime.utcnow()
-    start = end - timedelta(days=days)
+    tickers.append(benchmark)
 
-    data = yf.download(tickers+[benchmark], start=start.date(), end=end.date(), progress=False)["Adj Close"]
-    data = data.fillna(method="ffill")
-    rel = (data / data.iloc[0] - 1.0)
+    rel = {}
+    last_date = None
+
+    for sym in tickers:
+        bars = get_bars(sym, days=days)
+        df = pd.DataFrame(bars)
+        if df.empty: 
+            continue
+        df["t"] = pd.to_datetime(df["t"])
+        df.set_index("t", inplace=True)
+        df = df[["c"]]
+        df = df.rename(columns={"c": sym})
+        if last_date is None and not df.empty:
+            last_date = str(df.index[-1].date())
+        if sym not in rel:
+            rel[sym] = (df[sym].iloc[-1] / df[sym].iloc[0]) - 1
 
     return {
-        "portfolio": {t: round(float(rel[t].iloc[-1]),6) for t in tickers},
-        "benchmark": {benchmark: round(float(rel[benchmark].iloc[-1]),6)},
-        "last_date": str(data.index[-1].date())
+        "portfolio": {t: float(rel[t]) for t in tickers if t!=benchmark and t in rel},
+        "benchmark": {benchmark: float(rel[benchmark]) if benchmark in rel else 0.0},
+        "last_date": last_date
     }
