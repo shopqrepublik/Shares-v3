@@ -18,6 +18,19 @@ if OPENAI_API_KEY:
 DATA_DIR = "app/data"
 
 # -------------------------
+# Нормализация тикеров
+# -------------------------
+def normalize_ticker(ticker: str) -> str:
+    """
+    Приводим тикер к формату Yahoo Finance:
+    - заменяем точки на дефисы (BRK.B → BRK-B)
+    - убираем пробелы
+    """
+    if "." in ticker:
+        ticker = ticker.replace(".", "-")
+    return ticker.strip().upper()
+
+# -------------------------
 # Безопасная загрузка yfinance
 # -------------------------
 def safe_download(ticker, period="6mo", interval="1d", retries=3, delay=1):
@@ -46,6 +59,9 @@ def load_tickers():
             tickers += json.load(f)
     except Exception as e:
         logging.error(f"[TICKERS] Ошибка загрузки JSON: {e}")
+
+    # нормализуем тикеры
+    tickers = [normalize_ticker(t) for t in tickers]
     return list(set(tickers))  # уникальные тикеры
 
 # -------------------------
@@ -101,12 +117,15 @@ def build_portfolio(profile):
     tickers = load_tickers()
 
     portfolio = []
-    for ticker in random.sample(tickers, min(30, len(tickers))):  # берем 30 случайных для анализа
+    skipped = []
+    for ticker in random.sample(tickers, min(30, len(tickers))):  # берем 30 случайных
         hist = safe_download(ticker)
         if hist is None:
+            skipped.append(ticker)
             continue
         metrics = compute_metrics(hist)
         if not metrics:
+            skipped.append(ticker)
             continue
         annotations = ai_annotate(ticker, metrics)
         last_price = hist["Close"][-1]
@@ -124,5 +143,5 @@ def build_portfolio(profile):
 
     # сортировка по score
     portfolio = sorted(portfolio, key=lambda x: x["score"], reverse=True)[:5]
-    logging.info(f"[PORTFOLIO] готово: {len(portfolio)} акций")
-    return portfolio
+    logging.info(f"[PORTFOLIO] готово: {len(portfolio)} акций, пропущено {len(skipped)}")
+    return {"portfolio": portfolio, "skipped": skipped}
