@@ -134,7 +134,7 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
 
     For each stock, also forecast price at {profile.get('target_date')}.
 
-    Return JSON:
+    Return ONLY valid JSON, no markdown or text:
     {{
       "selected": [
         {{
@@ -153,6 +153,11 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
     text = resp.choices[0].message.content.strip()
     logging.info(f"[AI RAW OUTPUT] {text}")
     try:
+        # удаляем возможные markdown-блоки
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
         parsed = json.loads(text)["selected"]
         logging.info(f"[AI PARSED] {parsed}")
         return parsed
@@ -164,6 +169,14 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
 @app.get("/ping")
 async def ping():
     return {"message": "pong"}
+
+@app.get("/check_keys")
+async def check_keys(request: Request):
+    check_api_key(request)
+    return {
+        "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
+        "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing"
+    }
 
 @app.post("/onboard")
 async def onboard(request: Request, body: OnboardRequest):
@@ -179,13 +192,9 @@ async def build_portfolio(request: Request):
     if not profile:
         raise HTTPException(status_code=400, detail="Run /onboard first")
 
-    # 1. Кандидаты
     candidates = build_candidates(limit=20)
-
-    # 2. AI выбор
     selected = ai_select(candidates, profile)
 
-    # 3. Распределение бюджета
     budget = profile["budget"]
     if not selected:
         return {"status": "error", "message": "AI did not return selection"}
