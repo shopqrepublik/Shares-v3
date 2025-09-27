@@ -13,19 +13,21 @@ from openai import OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+DATA_DIR = "app/data"
+
 # -------------------------
 # Загрузка тикеров из файлов
 # -------------------------
 def load_tickers():
     tickers = []
     try:
-        with open("sp500.json", "r") as f:
+        with open(os.path.join(DATA_DIR, "sp500.json"), "r") as f:
             tickers += json.load(f)
     except Exception as e:
         logging.warning(f"Не удалось загрузить sp500.json: {e}")
 
     try:
-        with open("nasdaq100.json", "r") as f:
+        with open(os.path.join(DATA_DIR, "nasdaq100.json"), "r") as f:
             tickers += json.load(f)
     except Exception as e:
         logging.warning(f"Не удалось загрузить nasdaq100.json: {e}")
