@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
@@ -30,6 +31,7 @@ class OnboardRequest(BaseModel):
     goals: str
     horizon: str = ""
     experience: str = ""
+    micro_caps: bool = False
 
 # -------------------- Вспомогательные --------------------
 
@@ -65,8 +67,10 @@ async def ai_annotate(candidates: List[Dict[str, Any]], profile: Dict[str, Any])
     try:
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "Ты — финансовый аналитик."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "Ты — финансовый аналитик."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.3
         )
         text = resp.choices[0].message.content.strip()
@@ -111,14 +115,22 @@ async def build_portfolio(request: Request):
     enriched = await ai_annotate(candidates, profile)
 
     global CURRENT_PORTFOLIO
-    CURRENT_PORTFOLIO = enriched
+    CURRENT_PORTFOLIO = [
+        {
+            "symbol": c["symbol"],
+            "shares": c.get("quantity", 0),
+            "price": c.get("price", 0),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        for c in enriched
+    ]
 
-    return {"holdings": enriched}
+    return {"data": CURRENT_PORTFOLIO}
 
 @app.get("/portfolio/holdings")
 async def get_holdings(request: Request):
     check_api_key(request)
-    return {"holdings": CURRENT_PORTFOLIO}
+    return {"data": CURRENT_PORTFOLIO}
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
