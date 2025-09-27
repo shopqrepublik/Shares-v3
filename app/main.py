@@ -89,7 +89,6 @@ async def ai_annotate(candidates, profile):
             raw = data["choices"][0]["message"]["content"]
             logging.info(f"[AI RAW OUTPUT] {raw}")
 
-            # очистка от возможных ```json
             raw = raw.strip().replace("```json", "").replace("```", "")
 
             try:
@@ -136,7 +135,10 @@ async def build_portfolio(request: Request):
     candidates = build_core(profile_obj)
     enriched = await ai_annotate(candidates, USER_PROFILE)
 
-    # ✅ защита от ошибок
+    # 🛠 фикс: если вернул {"data": [...]}
+    if isinstance(enriched, dict) and "data" in enriched:
+        enriched = enriched["data"]
+
     if isinstance(enriched, str):
         try:
             enriched = json.loads(enriched)
