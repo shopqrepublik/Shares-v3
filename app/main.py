@@ -7,8 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
+from types import SimpleNamespace  # ✅ для конвертации dict -> объект
 
-# ✅ правильный импорт build_portfolio
+# правильный импорт build_portfolio
 from app.routers.portfolio import build_portfolio as build_core
 
 # -------------------------
@@ -16,10 +17,9 @@ from app.routers.portfolio import build_portfolio as build_core
 # -------------------------
 app = FastAPI()
 
-# ✅ Разрешаем CORS для фронта
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # можно ограничить ["https://wealth-dashboard-ai.lovable.app"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -119,7 +119,10 @@ async def build_portfolio(request: Request):
     if not USER_PROFILE:
         raise HTTPException(status_code=400, detail="User profile not set. Run /onboard first.")
 
-    candidates = build_core(USER_PROFILE)
+    # ✅ конвертируем dict -> объект
+    profile_obj = SimpleNamespace(**USER_PROFILE)
+
+    candidates = build_core(profile_obj)
     enriched = await ai_annotate(candidates, USER_PROFILE)
 
     global CURRENT_PORTFOLIO
