@@ -2,9 +2,6 @@ import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta, timezone
-
-import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,8 +12,6 @@ API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
-ALPACA_API_URL = "https://paper-api.alpaca.markets"
-ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO)
@@ -50,97 +45,38 @@ class Position(BaseModel):
     quantity: int
     price: float
     allocation: float
-    forecast: Dict[str, Any] = None
+    reason: Optional[str] = None
+    forecast: Optional[Dict[str, Any]] = None
 
 # ---------------- MEMORY STORAGE ----------------
 user_profiles: Dict[str, Any] = {}
 user_portfolios: Dict[str, List[Position]] = {}
 
-# ---------------- HELPERS ----------------
-def get_assets(limit: int = 50) -> List[str]:
-    """Берём список активных торгуемых активов с Alpaca"""
-    try:
-        r = requests.get(
-            f"{ALPACA_API_URL}/v2/assets",
-            headers={
-                "APCA-API-KEY-ID": ALPACA_API_KEY,
-                "APCA-API-SECRET-KEY": ALPACA_API_SECRET
-            },
-            timeout=20
-        )
-        r.raise_for_status()
-        assets = r.json()
-        syms = [a["symbol"] for a in assets if a["tradable"] and a["status"] == "active"]
-        return syms[:limit]
-    except Exception as e:
-        logging.warning(f"Assets fetch failed: {e}")
-        return ["AAPL", "MSFT", "SPY", "QQQ"]  # fallback
-
-def get_last_price(symbol: str) -> float:
-    """Последняя цена через Alpaca Market Data v2"""
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=5)
-    url = f"{ALPACA_DATA_URL}/stocks/{symbol}/bars"
-    params = {
-        "timeframe": "1Day",
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "limit": 5
-    }
-    try:
-        r = requests.get(url, headers={
-            "APCA-API-KEY-ID": ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": ALPACA_API_SECRET
-        }, params=params, timeout=20)
-        if r.status_code == 200:
-            bars = r.json().get("bars", [])
-            if bars:
-                return float(bars[-1]["c"])
-    except Exception as e:
-        logging.warning(f"Price fetch failed for {symbol}: {e}")
-    return 100.0
-
-def build_candidates(limit: int = 20) -> List[Dict[str, Any]]:
-    """Собираем кандидатов с Alpaca + последняя цена"""
-    tickers = get_assets(limit=limit)
-    candidates = []
-    for sym in tickers:
-        price = get_last_price(sym)
-        if price:
-            candidates.append({
-                "symbol": sym,
-                "price": price,
-                "marketCap": None,
-                "beta": None,
-                "dividendYield": None,
-                "volume": None
-            })
-    logging.info(f"[CANDIDATES] {len(candidates)} tickers fetched")
-    return candidates
-
-def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """AI отбирает 5 лучших бумаг"""
+# ---------------- AI ANNOTATION ----------------
+def ai_annotate(selected: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """AI добавляет прогноз и объяснение к уже выбранным акциям"""
     prompt = f"""
-    You are an investment AI.
-    From the following {len(candidates)} candidate stocks:
-    {json.dumps(candidates[:50], indent=2)}
+    You are an investment assistant.
+    For the following 5 selected stocks:
+    {json.dumps(selected, indent=2)}
 
-    Select exactly 5 stocks fitting this profile:
+    User profile:
     - Risk: {profile.get('risk_level')}
     - Goals: {profile.get('goals')}
-    - Micro caps allowed: {profile.get('micro_caps')}
     - Horizon: {profile.get('horizon')}
     - Experience: {profile.get('experience')}
 
-    For each stock, also forecast price at {profile.get('target_date')}.
+    For each stock, provide:
+    - reason (short explanation why it fits profile)
+    - forecast (expected price at {profile.get('target_date')})
 
-    Return ONLY valid JSON, no markdown or text:
+    Return ONLY valid JSON:
     {{
-      "selected": [
+      "annotated": [
         {{
           "symbol": "AAPL",
-          "reason": "Strong large-cap growth",
-          "forecast": {{"target_date":"{profile.get('target_date')}","price":210}}
+          "reason": "Large-cap stability with growth",
+          "forecast": {{"target_date": "{profile.get('target_date')}", "price": 210}}
         }}
       ]
     }}
@@ -153,12 +89,11 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
     text = resp.choices[0].message.content.strip()
     logging.info(f"[AI RAW OUTPUT] {text}")
     try:
-        # удаляем возможные markdown-блоки
         if text.startswith("```"):
             text = text.strip("`")
             if text.lower().startswith("json"):
                 text = text[4:].strip()
-        parsed = json.loads(text)["selected"]
+        parsed = json.loads(text)["annotated"]
         logging.info(f"[AI PARSED] {parsed}")
         return parsed
     except Exception as e:
@@ -192,25 +127,34 @@ async def build_portfolio(request: Request):
     if not profile:
         raise HTTPException(status_code=400, detail="Run /onboard first")
 
-    candidates = build_candidates(limit=20)
-    selected = ai_select(candidates, profile)
+    # 1. Берём готовый top-5 из portfolio.py
+    from portfolio import build_portfolio as build_core
+    holdings_resp = build_core()
+    selected = holdings_resp["data"]
 
-    budget = profile["budget"]
     if not selected:
-        return {"status": "error", "message": "AI did not return selection"}
+        return {"status": "error", "message": "No holdings built"}
 
-    alloc = budget / len(selected)
+    # 2. Обогащаем через AI (reason + forecast)
+    annotated = ai_annotate(selected, profile)
+
+    # 3. Объединяем данные
     positions = []
+    budget = profile["budget"]
+    alloc = budget / len(selected)
+
     for s in selected:
-        price = next((c["price"] for c in candidates if c["symbol"] == s["symbol"]), 100)
-        qty = int(alloc // price) if price else 0
+        extra = next((a for a in annotated if a["symbol"] == s["symbol"]), {})
+        qty = int(alloc // s["price"]) if s["price"] else 0
         positions.append(Position(
             symbol=s["symbol"],
             quantity=qty,
-            price=price,
+            price=s["price"],
             allocation=round(alloc/budget, 2),
-            forecast=s.get("forecast")
+            reason=extra.get("reason"),
+            forecast=extra.get("forecast")
         ))
+
     user_portfolios["portfolio"] = positions
     logging.info(f"[PORTFOLIO BUILT] {positions}")
     return {"status": "ok", "portfolio": [p.dict() for p in positions]}
