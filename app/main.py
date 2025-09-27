@@ -119,8 +119,8 @@ async def build_portfolio(request: Request):
     if not profile:
         raise HTTPException(status_code=400, detail="Run /onboard first")
 
-    # 1. Берём готовый top-5 из portfolio.py
-    from portfolio import build_portfolio as build_core
+    # 1. Берём готовый top-5 из app/routers/portfolio.py
+    from app.routers.portfolio import build_portfolio as build_core
     holdings_resp = build_core()
     selected = holdings_resp["data"]
 
