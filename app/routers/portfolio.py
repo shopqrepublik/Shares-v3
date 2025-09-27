@@ -1,53 +1,64 @@
 import os
 import json
 import logging
-from datetime import datetime
-from types import SimpleNamespace
-
+import random
 import yfinance as yf
-from openai import OpenAI
+import requests
+import pandas as pd
+from io import StringIO
+from datetime import datetime, timedelta
 
-# -------------------------
-# Настройки
-# -------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-DATA_DIR = "app/data"
 
 # -------------------------
-# Загрузка тикеров из файлов
+# Загрузка тикеров
 # -------------------------
-def load_tickers():
+def load_wikipedia_tickers():
     tickers = []
     try:
-        with open(os.path.join(DATA_DIR, "sp500.json"), "r") as f:
+        with open("app/data/sp500.json", "r") as f:
             tickers += json.load(f)
-    except Exception as e:
-        logging.warning(f"Не удалось загрузить sp500.json: {e}")
-
-    try:
-        with open(os.path.join(DATA_DIR, "nasdaq100.json"), "r") as f:
+        with open("app/data/nasdaq100.json", "r") as f:
             tickers += json.load(f)
+        logging.info(f"[Wikipedia] Загружено {len(tickers)} тикеров")
     except Exception as e:
-        logging.warning(f"Не удалось загрузить nasdaq100.json: {e}")
-
-    tickers = list(set(tickers))  # убираем дубликаты
+        logging.error(f"[Wikipedia] Ошибка загрузки: {e}")
     return tickers
 
-# -------------------------
-# Анализ акций
-# -------------------------
-def analyze_stock(ticker: str, period="6mo") -> dict:
+def fetch_finviz_tickers(filter_query: str):
+    """
+    Берём тикеры с Finviz screener
+    Пример filter_query:
+      - ETF: "ind_etf"
+      - MicroCap: "cap_micro"
+      - Growth: "fa_eps5years_pos,ta_perf_26wup"
+    """
+    url = f"https://finviz.com/screener.ashx?v=111&f={filter_query}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False)
-        if df.empty:
+        html = requests.get(url, headers=headers).text
+        tables = pd.read_html(StringIO(html))
+        if tables:
+            df = tables[0]
+            if "Ticker" in df.columns:
+                tickers = df["Ticker"].tolist()
+                logging.info(f"[Finviz] {filter_query} → {len(tickers)} тикеров")
+                return tickers
+    except Exception as e:
+        logging.error(f"[Finviz] Ошибка {filter_query}: {e}")
+    return []
+
+# -------------------------
+# Аналитика через yfinance
+# -------------------------
+def analyze_ticker(ticker):
+    try:
+        hist = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if hist.empty:
             return None
+        close_prices = hist["Close"]
 
-        first_price = df["Close"].iloc[0]
-        last_price = df["Close"].iloc[-1]
-
-        momentum = (last_price - first_price) / first_price
+        momentum = (close_prices.iloc[-1] / close_prices.iloc[0]) - 1
         score = round(momentum * 100, 2)
 
         if momentum > 0.1:
@@ -59,83 +70,111 @@ def analyze_stock(ticker: str, period="6mo") -> dict:
 
         return {
             "symbol": ticker,
-            "price": float(last_price),
+            "price": float(close_prices.iloc[-1]),
             "score": score,
             "momentum": round(momentum, 3),
-            "pattern": pattern
+            "pattern": pattern,
         }
     except Exception as e:
-        logging.error(f"Ошибка анализа {ticker}: {e}")
+        logging.warning(f"[yfinance] Ошибка для {ticker}: {e}")
         return None
 
 # -------------------------
-# Аннотация OpenAI
+# AI-аннотация
 # -------------------------
 def annotate_with_ai(candidates, profile):
     if not OPENAI_API_KEY:
-        logging.warning("Нет OPENAI_API_KEY — вернём без аннотаций")
+        logging.warning("OPENAI_API_KEY отсутствует, пропускаем аннотации")
         return candidates
 
-    prompt = f"""
-Ты — инвестиционный аналитик. У тебя есть портфель кандидатов {json.dumps(candidates)}.
-Для каждого тикера добавь:
-- reason: краткое объяснение (1–2 предложения), почему акция выбрана
-- forecast: JSON с target_date (через 6 месяцев) и target_price
+    import httpx
+    import json
 
-Профиль инвестора: {profile}.
-Верни JSON {{"symbols":[{{"symbol":"AAPL","reason":"...","forecast":{{"target_date":"2025-12-01","price":200}}}}]}}
+    prompt = f"""
+    У тебя есть список акций: {candidates}.
+    Для каждой бумаги добавь:
+    - reason: объяснение выбора
+    - forecast: JSON с target_date (через 6 месяцев) и target_price
+    Профиль инвестора: {profile}.
+    Верни JSON {{"symbols":[...]}}
     """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                },
+            )
+            data = resp.json()
+            raw = data["choices"][0]["message"]["content"]
+            raw = raw.strip().replace("```json", "").replace("```", "")
+            parsed = json.loads(raw)
 
-        raw = response.choices[0].message.content.strip()
-        raw = raw.replace("```json", "").replace("```", "")
+            ai_map = {}
+            if isinstance(parsed, dict) and "symbols" in parsed:
+                for item in parsed["symbols"]:
+                    ai_map[item.get("symbol")] = item
 
-        parsed = json.loads(raw)
-        ai_map = {}
-        for item in parsed.get("symbols", []):
-            ai_map[item["symbol"]] = item
+            enriched = []
+            for c in candidates:
+                sym = c.get("symbol")
+                if sym in ai_map:
+                    c["reason"] = ai_map[sym].get("reason", "")
+                    c["forecast"] = ai_map[sym].get("forecast", {})
+                enriched.append(c)
 
-        enriched = []
-        for c in candidates:
-            if c["symbol"] in ai_map:
-                c["reason"] = ai_map[c["symbol"]].get("reason", "")
-                c["forecast"] = ai_map[c["symbol"]].get("forecast", {})
-            enriched.append(c)
-
-        return enriched
+            return enriched
     except Exception as e:
-        logging.error(f"AI аннотация сломалась: {e}")
+        logging.error(f"[AI] Ошибка: {e}")
         return candidates
 
 # -------------------------
 # Построение портфеля
 # -------------------------
-def build_portfolio(profile: SimpleNamespace):
-    tickers = load_tickers()
-    results = []
+def build_portfolio(profile):
+    tickers = []
 
-    logging.info(f"Анализируем {len(tickers)} тикеров...")
+    # Wikipedia базовые тикеры
+    tickers += load_wikipedia_tickers()
 
-    for t in tickers:
-        data = analyze_stock(t)
-        if data:
-            results.append(data)
+    # Finviz сегменты
+    tickers += fetch_finviz_tickers("ind_etf")[:10]       # ETFs
+    tickers += fetch_finviz_tickers("cap_micro")[:10]     # Micro-caps
+    tickers += fetch_finviz_tickers("fa_eps5years_pos,ta_perf_26wup")[:10]  # Growth
 
-    if not results:
-        logging.warning("Нет данных для анализа!")
-        return []
+    tickers = list(set(tickers))  # убираем дубли
 
-    results.sort(key=lambda x: x["score"], reverse=True)
-    top5 = results[:5]
-    enriched = annotate_with_ai(top5, profile)
+    # Анализируем
+    candidates = []
+    for t in tickers[:50]:  # ограничим первыми 50 для скорости
+        info = analyze_ticker(t)
+        if info:
+            candidates.append(info)
 
+    # Сортировка по score
+    candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
+
+    # Берём топ-5
+    top_candidates = candidates[:5]
+
+    # Аннотации
+    enriched = annotate_with_ai(top_candidates, profile)
+
+    # Добавляем количество акций по бюджету
+    budget = profile.get("budget", 1000)
+    allocation = budget / len(enriched) if enriched else 0
     for c in enriched:
+        price = c.get("price", 1)
+        c["quantity"] = int(allocation // price)
         c["timestamp"] = datetime.utcnow().isoformat()
 
+    logging.info(f"[Portfolio] Сформировано {len(enriched)} бумаг")
     return enriched
