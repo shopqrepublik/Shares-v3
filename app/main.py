@@ -100,16 +100,16 @@ async def onboard(req: OnboardRequest, request: Request):
 @app.post("/portfolio/build")
 async def build_portfolio(request: Request):
     check_api_key(request)
-    profile = USER_PROFILE or {"budget": 1000, "risk_level": "medium", "goals": "grow"}
 
-    # получаем кандидатов из core
+    if not USER_PROFILE:
+        raise HTTPException(status_code=400, detail="User profile not set. Run /onboard first.")
+
+    profile = USER_PROFILE
     candidates = build_core(profile)
     logging.info(f"[CANDIDATES] {candidates}")
 
-    # аннотация AI
     enriched = await ai_annotate(candidates, profile)
 
-    # ✅ сохраняем глобально
     global CURRENT_PORTFOLIO
     CURRENT_PORTFOLIO = enriched
 
