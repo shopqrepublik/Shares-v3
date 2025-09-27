@@ -1,41 +1,52 @@
 import os
-import json
 import logging
-from datetime import datetime
-from typing import List, Optional
-
+import json
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from datetime import datetime
 
+# ✅ правильный импорт build_portfolio
 from app.routers.portfolio import build_portfolio as build_core
 
-# ----------------
-# Конфигурация
-# ----------------
-logging.basicConfig(level=logging.INFO)
-
-API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
-
-# ----------------
-# FastAPI + CORS
-# ----------------
+# -------------------------
+# Настройка FastAPI
+# -------------------------
 app = FastAPI()
 
+# ✅ Разрешаем CORS для фронта
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*", "https://wealth-dashboard-ai.lovable.app"],
+    allow_origins=["*"],  # можно ограничить ["https://wealth-dashboard-ai.lovable.app"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ----------------
-# Модели
-# ----------------
+# -------------------------
+# Переменные окружения
+# -------------------------
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+USER_PROFILE = None
+CURRENT_PORTFOLIO = []
+
+# -------------------------
+# Проверка API ключа
+# -------------------------
+def check_api_key(request: Request):
+    key = request.headers.get("X-API-Key")
+    if not key or key != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# -------------------------
+# Pydantic модели
+# -------------------------
 class OnboardRequest(BaseModel):
     budget: float
     risk_level: str
@@ -43,37 +54,57 @@ class OnboardRequest(BaseModel):
     horizon: str
     knowledge: str
 
-USER_PROFILE: Optional[dict] = None
-CURRENT_PORTFOLIO: List[dict] = []
+# -------------------------
+# AI аннотации
+# -------------------------
+async def ai_annotate(candidates, profile):
+    if not OPENAI_API_KEY:
+        logging.warning("OPENAI_API_KEY not set, skipping AI annotation")
+        return candidates
 
+    prompt = f"""
+    У тебя есть список акций: {candidates}.
+    Для каждой бумаги добавь:
+    - reason: объяснение выбора
+    - forecast: JSON с target_date (6m) и target_price
+    Профиль инвестора: {profile}.
+    Верни JSON {{"symbols":[{{"symbol":"AAPL","reason":"...","forecast":{{"target_date":"2025-12-01","price":200}}}}]}}.
+    """
 
-# ----------------
-# Утилиты
-# ----------------
-def check_api_key(request: Request):
-    api_key = request.headers.get("X-API-Key")
-    if api_key != API_PASSWORD:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                },
+            )
+            data = resp.json()
+            raw = data["choices"][0]["message"]["content"]
+            logging.info(f"[AI RAW OUTPUT] {raw}")
 
+            parsed = json.loads(raw.replace("```json", "").replace("```", ""))
+            ai_map = {item["symbol"]: item for item in parsed.get("symbols", [])}
 
-# ----------------
-# Маршруты
-# ----------------
-@app.get("/ping")
-async def ping(request: Request):
-    check_api_key(request)
-    return {"message": "pong"}
+            for c in candidates:
+                sym = c["symbol"]
+                if sym in ai_map:
+                    c["reason"] = ai_map[sym].get("reason", "")
+                    c["forecast"] = ai_map[sym].get("forecast", {})
+            return candidates
+    except Exception as e:
+        logging.error(f"AI annotation failed: {e}")
+        return candidates
 
-
-@app.get("/check_keys")
-async def check_keys(request: Request):
-    check_api_key(request)
-    return {
-        "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
-        "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing"
-    }
-
-
+# -------------------------
+# Роуты
+# -------------------------
 @app.post("/onboard")
 async def onboard(req: OnboardRequest, request: Request):
     check_api_key(request)
@@ -82,53 +113,65 @@ async def onboard(req: OnboardRequest, request: Request):
     logging.info(f"[ONBOARD] {USER_PROFILE}")
     return {"status": "ok", "profile": USER_PROFILE}
 
-
 @app.post("/portfolio/build")
 async def build_portfolio(request: Request):
     check_api_key(request)
-    global USER_PROFILE, CURRENT_PORTFOLIO
     if not USER_PROFILE:
         raise HTTPException(status_code=400, detail="User profile not set. Run /onboard first.")
 
-    # Получаем базовые 5 бумаг из portfolio.py
     candidates = build_core(USER_PROFILE)
+    enriched = await ai_annotate(candidates, USER_PROFILE)
 
-    # Здесь можно добавить AI-аннотации, сейчас просто обогащаем базовыми полями
-    enriched = []
-    budget = USER_PROFILE.get("budget", 1000)
-    allocation = budget / len(candidates) if candidates else 0
-
-    for c in candidates:
-        enriched.append({
+    global CURRENT_PORTFOLIO
+    CURRENT_PORTFOLIO = [
+        {
             "symbol": c["symbol"],
-            "price": c.get("price", 100),
-            "shares": round(allocation / c.get("price", 100), 2),
-            "score": c.get("score"),
+            "shares": c.get("quantity", 0),
+            "price": c.get("price", 0.0),
+            "score": c.get("score", 0),
             "momentum": c.get("momentum"),
             "pattern": c.get("pattern"),
+            "reason": c.get("reason"),
+            "forecast": c.get("forecast"),
             "timestamp": datetime.utcnow().isoformat()
-        })
+        }
+        for c in enriched
+    ]
 
-    CURRENT_PORTFOLIO = enriched
-    logging.info(f"[PORTFOLIO BUILT] {CURRENT_PORTFOLIO}")
-
-    return {"data": enriched}
-
-
-@app.get("/portfolio/holdings")
-async def holdings(request: Request):
-    check_api_key(request)
-    global CURRENT_PORTFOLIO
     return {"data": CURRENT_PORTFOLIO}
 
+@app.get("/portfolio/holdings")
+async def get_holdings(request: Request):
+    check_api_key(request)
+    return {"data": CURRENT_PORTFOLIO}
 
-# ----------------
-# Отладка CORS
-# ----------------
+@app.get("/check_keys")
+async def check_keys(request: Request):
+    check_api_key(request)
+    return {
+        "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
+        "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing",
+        "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing"
+    }
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
 @app.options("/debug_cors")
 async def debug_cors_options():
-    return {"message": "CORS preflight ok"}
+    return JSONResponse(
+        content={"message": "CORS preflight OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
 
 @app.get("/debug_cors")
-async def debug_cors():
-    return {"message": "CORS GET ok"}
+async def debug_cors_get():
+    return JSONResponse(
+        content={"message": "CORS GET OK"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
