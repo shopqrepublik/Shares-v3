@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
-from types import SimpleNamespace  # ✅ для конвертации dict -> объект
+from types import SimpleNamespace
 
 # правильный импорт build_portfolio
 from app.routers.portfolio import build_portfolio as build_core
@@ -89,14 +89,26 @@ async def ai_annotate(candidates, profile):
             raw = data["choices"][0]["message"]["content"]
             logging.info(f"[AI RAW OUTPUT] {raw}")
 
-            parsed = json.loads(raw.replace("```json", "").replace("```", ""))
-            ai_map = {item["symbol"]: item for item in parsed.get("symbols", [])}
+            # очистка от возможных ```json
+            raw = raw.strip().replace("```json", "").replace("```", "")
+
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                logging.error(f"AI response is not valid JSON: {raw}")
+                return candidates
+
+            ai_map = {}
+            if isinstance(parsed, dict) and "symbols" in parsed:
+                for item in parsed["symbols"]:
+                    ai_map[item.get("symbol")] = item
 
             for c in candidates:
                 sym = c["symbol"]
                 if sym in ai_map:
                     c["reason"] = ai_map[sym].get("reason", "")
                     c["forecast"] = ai_map[sym].get("forecast", {})
+
             return candidates
     except Exception as e:
         logging.error(f"AI annotation failed: {e}")
@@ -119,16 +131,27 @@ async def build_portfolio(request: Request):
     if not USER_PROFILE:
         raise HTTPException(status_code=400, detail="User profile not set. Run /onboard first.")
 
-    # ✅ конвертируем dict -> объект
     profile_obj = SimpleNamespace(**USER_PROFILE)
 
     candidates = build_core(profile_obj)
     enriched = await ai_annotate(candidates, USER_PROFILE)
 
+    # ✅ защита от ошибок
+    if isinstance(enriched, str):
+        try:
+            enriched = json.loads(enriched)
+        except Exception:
+            logging.error(f"Enriched portfolio is string and not JSON: {enriched}")
+            raise HTTPException(status_code=500, detail="AI response format error")
+
+    if not isinstance(enriched, list):
+        logging.error(f"Unexpected enriched type: {type(enriched)}, value: {enriched}")
+        raise HTTPException(status_code=500, detail="Invalid portfolio format")
+
     global CURRENT_PORTFOLIO
     CURRENT_PORTFOLIO = [
         {
-            "symbol": c["symbol"],
+            "symbol": c.get("symbol"),
             "shares": c.get("quantity", 0),
             "price": c.get("price", 0.0),
             "score": c.get("score", 0),
@@ -138,7 +161,7 @@ async def build_portfolio(request: Request):
             "forecast": c.get("forecast"),
             "timestamp": datetime.utcnow().isoformat()
         }
-        for c in enriched
+        for c in enriched if isinstance(c, dict)
     ]
 
     return {"data": CURRENT_PORTFOLIO}
