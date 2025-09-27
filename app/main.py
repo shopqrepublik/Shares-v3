@@ -101,11 +101,9 @@ async def ai_annotate(candidates, profile):
                 for item in parsed["symbols"]:
                     ai_map[item.get("symbol")] = item
 
-            # аккуратно проходим кандидатов
             safe = []
             for c in candidates:
                 if not isinstance(c, dict):
-                    logging.warning(f"Skipping non-dict candidate: {c}")
                     continue
                 sym = c.get("symbol")
                 if sym in ai_map:
@@ -140,7 +138,7 @@ async def build_portfolio(request: Request):
     candidates = build_core(profile_obj)
     enriched = await ai_annotate(candidates, USER_PROFILE)
 
-    # 🛠 фикс: обрабатываем все случаи
+    # 🛠 обработка случаев {"data": [...]}, строк или других форматов
     if isinstance(enriched, dict) and "data" in enriched:
         enriched = enriched["data"]
 
@@ -155,18 +153,13 @@ async def build_portfolio(request: Request):
         logging.error(f"Unexpected enriched type: {type(enriched)}, value: {enriched}")
         enriched = []
 
-    # фильтруем только словари
-    valid = []
+    # гарантируем, что формируем портфель
+    global CURRENT_PORTFOLIO
+    CURRENT_PORTFOLIO = []
     for c in enriched:
         if not isinstance(c, dict):
-            logging.warning(f"Skipping non-dict item: {c}")
             continue
-        valid.append(c)
-    enriched = valid
-
-    global CURRENT_PORTFOLIO
-    CURRENT_PORTFOLIO = [
-        {
+        CURRENT_PORTFOLIO.append({
             "symbol": c.get("symbol"),
             "shares": c.get("quantity", 0),
             "price": c.get("price", 0.0),
@@ -176,9 +169,7 @@ async def build_portfolio(request: Request):
             "reason": c.get("reason"),
             "forecast": c.get("forecast"),
             "timestamp": datetime.utcnow().isoformat()
-        }
-        for c in enriched
-    ]
+        })
 
     return {"data": CURRENT_PORTFOLIO}
 
