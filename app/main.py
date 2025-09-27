@@ -115,6 +115,7 @@ def build_candidates(limit: int = 20) -> List[Dict[str, Any]]:
                 "dividendYield": None,
                 "volume": None
             })
+    logging.info(f"[CANDIDATES] {len(candidates)} tickers fetched")
     return candidates
 
 def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -150,8 +151,11 @@ def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List
         temperature=0.2
     )
     text = resp.choices[0].message.content.strip()
+    logging.info(f"[AI RAW OUTPUT] {text}")
     try:
-        return json.loads(text)["selected"]
+        parsed = json.loads(text)["selected"]
+        logging.info(f"[AI PARSED] {parsed}")
+        return parsed
     except Exception as e:
         logging.error(f"AI parse error: {e}, raw: {text}")
         return []
@@ -165,6 +169,7 @@ async def ping():
 async def onboard(request: Request, body: OnboardRequest):
     check_api_key(request)
     user_profiles["profile"] = body.dict()
+    logging.info(f"[ONBOARD] {user_profiles['profile']}")
     return {"status": "ok", "profile": user_profiles["profile"]}
 
 @app.post("/portfolio/build")
@@ -198,6 +203,7 @@ async def build_portfolio(request: Request):
             forecast=s.get("forecast")
         ))
     user_portfolios["portfolio"] = positions
+    logging.info(f"[PORTFOLIO BUILT] {positions}")
     return {"status": "ok", "portfolio": [p.dict() for p in positions]}
 
 @app.get("/portfolio/holdings")
