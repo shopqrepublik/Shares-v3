@@ -2,19 +2,23 @@ import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta, timezone
 
-import yfinance as yf
+import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import httpx
 from openai import OpenAI
 
 # ---------------- CONFIG ----------------
 API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_API_KEY)
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+ALPACA_API_URL = "https://paper-api.alpaca.markets"
+ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
 
+client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
@@ -38,8 +42,8 @@ class OnboardRequest(BaseModel):
     goals: str
     micro_caps: bool = False
     target_date: str = "2026-01-01"
-    horizon: Optional[str] = None       # добавлено
-    experience: Optional[str] = None    # добавлено
+    horizon: Optional[str] = None
+    experience: Optional[str] = None
 
 class Position(BaseModel):
     symbol: str
@@ -53,42 +57,72 @@ user_profiles: Dict[str, Any] = {}
 user_portfolios: Dict[str, List[Position]] = {}
 
 # ---------------- HELPERS ----------------
-def build_candidates(limit: int = 100) -> List[Dict[str, Any]]:
-    """
-    Собираем список кандидатов из S&P500 через yfinance с метриками.
-    """
-    tickers = [
-        "AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "META", "NVDA", "JPM", "V", "JNJ",
-        "PG", "HD", "DIS", "NFLX", "KO", "PEP", "XOM", "CVX", "BA", "IBM"
-    ]
+def get_assets(limit: int = 50) -> List[str]:
+    """Берём список активных торгуемых активов с Alpaca"""
+    try:
+        r = requests.get(
+            f"{ALPACA_API_URL}/v2/assets",
+            headers={
+                "APCA-API-KEY-ID": ALPACA_API_KEY,
+                "APCA-API-SECRET-KEY": ALPACA_API_SECRET
+            },
+            timeout=20
+        )
+        r.raise_for_status()
+        assets = r.json()
+        syms = [a["symbol"] for a in assets if a["tradable"] and a["status"] == "active"]
+        return syms[:limit]
+    except Exception as e:
+        logging.warning(f"Assets fetch failed: {e}")
+        return ["AAPL", "MSFT", "SPY", "QQQ"]  # fallback
+
+def get_last_price(symbol: str) -> float:
+    """Последняя цена через Alpaca Market Data v2"""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=5)
+    url = f"{ALPACA_DATA_URL}/stocks/{symbol}/bars"
+    params = {
+        "timeframe": "1Day",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "limit": 5
+    }
+    try:
+        r = requests.get(url, headers={
+            "APCA-API-KEY-ID": ALPACA_API_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_API_SECRET
+        }, params=params, timeout=20)
+        if r.status_code == 200:
+            bars = r.json().get("bars", [])
+            if bars:
+                return float(bars[-1]["c"])
+    except Exception as e:
+        logging.warning(f"Price fetch failed for {symbol}: {e}")
+    return 100.0
+
+def build_candidates(limit: int = 20) -> List[Dict[str, Any]]:
+    """Собираем кандидатов с Alpaca + последняя цена"""
+    tickers = get_assets(limit=limit)
     candidates = []
-    for sym in tickers[:limit]:
-        try:
-            data = yf.Ticker(sym)
-            info = data.info
-            hist = data.history(period="3mo")
-            avg_vol = int(hist["Volume"].mean()) if not hist.empty else None
+    for sym in tickers:
+        price = get_last_price(sym)
+        if price:
             candidates.append({
                 "symbol": sym,
-                "price": info.get("currentPrice"),
-                "marketCap": info.get("marketCap"),
-                "beta": info.get("beta"),
-                "dividendYield": info.get("dividendYield"),
-                "volume": avg_vol
+                "price": price,
+                "marketCap": None,
+                "beta": None,
+                "dividendYield": None,
+                "volume": None
             })
-        except Exception as e:
-            logging.warning(f"Ошибка для {sym}: {e}")
-            continue
-    return [c for c in candidates if c.get("price")]
+    return candidates
 
 def ai_select(candidates: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Отправляем кандидатов в OpenAI → получаем 5 лучших + прогнозы.
-    """
+    """AI отбирает 5 лучших бумаг"""
     prompt = f"""
     You are an investment AI.
-    From the following {len(candidates)} candidate stocks with metrics:
-    {json.dumps(candidates[:100], indent=2)}
+    From the following {len(candidates)} candidate stocks:
+    {json.dumps(candidates[:50], indent=2)}
 
     Select exactly 5 stocks fitting this profile:
     - Risk: {profile.get('risk_level')}
@@ -141,7 +175,7 @@ async def build_portfolio(request: Request):
         raise HTTPException(status_code=400, detail="Run /onboard first")
 
     # 1. Кандидаты
-    candidates = build_candidates(limit=100)
+    candidates = build_candidates(limit=20)
 
     # 2. AI выбор
     selected = ai_select(candidates, profile)
