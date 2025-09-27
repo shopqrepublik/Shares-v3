@@ -1,206 +1,138 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta, timezone
-from math import floor
-import logging, os, requests
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import LinearRegression
+import os
+import logging
+import json
+from datetime import datetime
+from types import SimpleNamespace
 
-log = logging.getLogger(__name__)
+import yfinance as yf
+from openai import OpenAI
 
-router = APIRouter(prefix="/portfolio", tags=["portfolio"])
+# -------------------------
+# Настройки
+# -------------------------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -----------------------------
-# МОДЕЛИ ОТВЕТА
-# -----------------------------
-class HoldingOut(BaseModel):
-    symbol: str
-    shares: float
-    price: float
-    timestamp: str
-    score: Optional[float] = None
+# S&P500 + NASDAQ100 (сокращённый список, можно расширить)
+SP500_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META",
+    "TSLA", "NVDA", "BRK-B", "JPM", "JNJ",
+    "V", "PG", "UNH", "HD", "XOM"
+]
 
-class HoldingsResponse(BaseModel):
-    data: List[HoldingOut]
+NASDAQ100_TICKERS = [
+    "AAPL", "MSFT", "AMZN", "META", "GOOGL",
+    "TSLA", "NVDA", "PEP", "ADBE", "NFLX"
+]
 
-# -----------------------------
-# In-memory хранилище
-# -----------------------------
-CURRENT_HOLDINGS: List[Dict[str, Any]] = []
-
-# -----------------------------
-# Alpaca API конфиг
-# -----------------------------
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET")
-ALPACA_API_URL = "https://paper-api.alpaca.markets"
-ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
-
-# -----------------------------
-# Вспомогательные функции
-# -----------------------------
-def get_assets(limit=200):
-    """Берем список активов с Alpaca (ограничим для MVP)."""
+# -------------------------
+# Метрики
+# -------------------------
+def analyze_stock(ticker: str, period="6mo") -> dict:
     try:
-        r = requests.get(f"{ALPACA_API_URL}/v2/assets", headers={
-            "APCA-API-KEY-ID": ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": ALPACA_API_SECRET
-        }, timeout=20)
-        r.raise_for_status()
-        assets = r.json()
-        syms = [a["symbol"] for a in assets if a["tradable"] and a["status"]=="active"]
-        return syms[:limit]
+        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        if df.empty:
+            return None
+
+        first_price = df["Close"].iloc[0]
+        last_price = df["Close"].iloc[-1]
+
+        momentum = (last_price - first_price) / first_price
+        score = round(momentum * 100, 2)
+
+        if momentum > 0.1:
+            pattern = "uptrend"
+        elif momentum < -0.1:
+            pattern = "downtrend"
+        else:
+            pattern = "sideways"
+
+        return {
+            "symbol": ticker,
+            "price": float(last_price),
+            "score": score,
+            "momentum": round(momentum, 3),
+            "pattern": pattern
+        }
     except Exception as e:
-        log.warning("Assets fetch failed: %s", e)
-        return ["AAPL","MSFT","SPY","QQQ"]  # fallback
-
-def get_bars(symbol: str, days: int = 180):
-    """Загрузка дневных баров через Alpaca Market Data API v2"""
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
-    url = f"{ALPACA_DATA_URL}/stocks/{symbol}/bars"
-    params = {
-        "timeframe": "1Day",
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "limit": days
-    }
-    r = requests.get(url, headers={
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_API_SECRET
-    }, params=params, timeout=20)
-    if r.status_code != 200:
-        return []
-    return r.json().get("bars", [])
-
-def compute_metrics(bars: list):
-    if not bars or len(bars) < 20:
+        logging.error(f"Ошибка анализа {ticker}: {e}")
         return None
-    
-    df = pd.DataFrame(bars)
-    df["t"] = pd.to_datetime(df["t"])
-    df.set_index("t", inplace=True)
 
-    # Momentum (3 месяца ~ 60 дней)
-    mom = (df["c"].iloc[-1] / df["c"].iloc[-60]) - 1 if len(df) > 60 else 0
+# -------------------------
+# OpenAI аннотация
+# -------------------------
+def annotate_with_ai(candidates, profile):
+    if not OPENAI_API_KEY:
+        logging.warning("Нет OPENAI_API_KEY — вернём без аннотаций")
+        return candidates
 
-    # Volume spike
-    vol_spike = df["v"].iloc[-1] / df["v"].tail(20).mean()
+    prompt = f"""
+Ты — инвестиционный аналитик. У тебя есть портфель кандидатов {json.dumps(candidates)}.
+Для каждого тикера добавь:
+- reason: краткое объяснение (1–2 предложения), почему акция выбрана
+- forecast: JSON с target_date (через 6 месяцев) и target_price (разумный прогноз)
 
-    # Forecast (линейная регрессия на последних N дней)
-    closes = df["c"].values
-    X = np.arange(len(closes)).reshape(-1, 1)
-    y = closes
-    model = LinearRegression().fit(X, y)
-    future_x = np.arange(len(closes), len(closes)+30).reshape(-1, 1)
-    preds = model.predict(future_x)
-    forecast = (preds[-1] - closes[-1]) / closes[-1]
+Профиль инвестора: {profile}.
+Верни JSON вида:
+{{"symbols":[{{"symbol":"AAPL","reason":"...","forecast":{{"target_date":"2025-12-01","price":200}}}}]}}
+    """
 
-    # Простейший паттерн (Bullish Engulfing)
-    pattern = 0
-    if len(df) >= 2:
-        prev, last = df.iloc[-2], df.iloc[-1]
-        if (last["c"] > last["o"] and prev["c"] < prev["o"] 
-            and last["c"] > prev["o"] and last["o"] < prev["c"]):
-            pattern = 1
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
 
-    return {
-        "momentum": mom,
-        "vol_spike": vol_spike,
-        "forecast": forecast,
-        "pattern": pattern,
-        "last_price": df["c"].iloc[-1]
-    }
+        raw = response.choices[0].message.content.strip()
+        raw = raw.replace("```json", "").replace("```", "")
 
-# -----------------------------
-# /holdings
-# -----------------------------
-@router.get("/holdings", response_model=HoldingsResponse)
-def get_holdings():
-    return {"data": CURRENT_HOLDINGS}
+        parsed = json.loads(raw)
+        ai_map = {}
+        for item in parsed.get("symbols", []):
+            ai_map[item["symbol"]] = item
 
-# -----------------------------
-# /build
-# -----------------------------
-class BuildRequest(BaseModel):
-    budget: float = 1000.0
-    risk_level: str = "medium"
-    micro_caps: bool = False
+        enriched = []
+        for c in candidates:
+            if c["symbol"] in ai_map:
+                c["reason"] = ai_map[c["symbol"]].get("reason", "")
+                c["forecast"] = ai_map[c["symbol"]].get("forecast", {})
+            enriched.append(c)
 
-@router.post("/build", response_model=HoldingsResponse)
-def build_portfolio(body: Optional[BuildRequest] = None):
-    global CURRENT_HOLDINGS
+        return enriched
+    except Exception as e:
+        logging.error(f"AI аннотация сломалась: {e}")
+        return candidates
 
-    budget_val = float(body.budget if body else 1000.0)
+# -------------------------
+# Построение портфеля
+# -------------------------
+def build_portfolio(profile: SimpleNamespace):
+    tickers = list(set(SP500_TICKERS + NASDAQ100_TICKERS))
+    results = []
 
-    symbols = get_assets(limit=50)  # ограничим 50 для скорости
-    scored = []
+    logging.info(f"Анализируем {len(tickers)} тикеров...")
 
-    for sym in symbols:
-        try:
-            bars = get_bars(sym, days=180)
-            metrics = compute_metrics(bars)
-            if not metrics:
-                continue
-            score = (0.4*metrics["momentum"] 
-                     + 0.2*metrics["vol_spike"] 
-                     + 0.3*metrics["forecast"] 
-                     + 0.1*metrics["pattern"])
-            scored.append((sym, score, metrics["last_price"]))
-        except Exception as e:
-            log.warning("Metrics failed for %s: %s", sym, e)
-            continue
+    for t in tickers:
+        data = analyze_stock(t)
+        if data:
+            results.append(data)
 
-    # Берем top-5
-    top = sorted(scored, key=lambda x:x[1], reverse=True)[:5]
+    if not results:
+        logging.warning("Нет данных для анализа!")
+        return []
 
-    holdings: List[Dict[str,Any]] = []
-    now_iso = datetime.now(timezone.utc).isoformat()
-    per_bucket = budget_val / max(1, len(top))
+    # сортируем по score
+    results.sort(key=lambda x: x["score"], reverse=True)
 
-    for sym,score,px in top:
-        qty = floor(per_bucket/px) if px>0 else 0
-        if qty <= 0: qty = 1
-        holdings.append({
-            "symbol": sym,
-            "shares": float(qty),
-            "price": float(px),
-            "timestamp": now_iso,
-            "score": score
-        })
+    # топ-5
+    top5 = results[:5]
 
-    CURRENT_HOLDINGS = holdings
-    return {"data": holdings}
+    # добавляем AI-аннотацию
+    enriched = annotate_with_ai(top5, profile)
 
-# -----------------------------
-# /track (пока через Alpaca bars для SPY и тикеров)
-# -----------------------------
-@router.get("/track")
-def track_portfolio(symbols: str, benchmark: str="SPY", days: int=365):
-    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-    tickers.append(benchmark)
+    # timestamp
+    for c in enriched:
+        c["timestamp"] = datetime.utcnow().isoformat()
 
-    rel = {}
-    last_date = None
-
-    for sym in tickers:
-        bars = get_bars(sym, days=days)
-        df = pd.DataFrame(bars)
-        if df.empty: 
-            continue
-        df["t"] = pd.to_datetime(df["t"])
-        df.set_index("t", inplace=True)
-        df = df[["c"]]
-        df = df.rename(columns={"c": sym})
-        if last_date is None and not df.empty:
-            last_date = str(df.index[-1].date())
-        if sym not in rel:
-            rel[sym] = (df[sym].iloc[-1] / df[sym].iloc[0]) - 1
-
-    return {
-        "portfolio": {t: float(rel[t]) for t in tickers if t!=benchmark and t in rel},
-        "benchmark": {benchmark: float(rel[benchmark]) if benchmark in rel else 0.0},
-        "last_date": last_date
-    }
+    return enriched
