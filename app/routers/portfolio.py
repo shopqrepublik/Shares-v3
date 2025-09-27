@@ -1,6 +1,6 @@
 import os
-import logging
 import json
+import logging
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -13,20 +13,28 @@ from openai import OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# S&P500 + NASDAQ100 (сокращённый список, можно расширить)
-SP500_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META",
-    "TSLA", "NVDA", "BRK-B", "JPM", "JNJ",
-    "V", "PG", "UNH", "HD", "XOM"
-]
+# -------------------------
+# Загрузка тикеров из файлов
+# -------------------------
+def load_tickers():
+    tickers = []
+    try:
+        with open("sp500.json", "r") as f:
+            tickers += json.load(f)
+    except Exception as e:
+        logging.warning(f"Не удалось загрузить sp500.json: {e}")
 
-NASDAQ100_TICKERS = [
-    "AAPL", "MSFT", "AMZN", "META", "GOOGL",
-    "TSLA", "NVDA", "PEP", "ADBE", "NFLX"
-]
+    try:
+        with open("nasdaq100.json", "r") as f:
+            tickers += json.load(f)
+    except Exception as e:
+        logging.warning(f"Не удалось загрузить nasdaq100.json: {e}")
+
+    tickers = list(set(tickers))  # убираем дубликаты
+    return tickers
 
 # -------------------------
-# Метрики
+# Анализ акций
 # -------------------------
 def analyze_stock(ticker: str, period="6mo") -> dict:
     try:
@@ -59,7 +67,7 @@ def analyze_stock(ticker: str, period="6mo") -> dict:
         return None
 
 # -------------------------
-# OpenAI аннотация
+# Аннотация OpenAI
 # -------------------------
 def annotate_with_ai(candidates, profile):
     if not OPENAI_API_KEY:
@@ -70,11 +78,10 @@ def annotate_with_ai(candidates, profile):
 Ты — инвестиционный аналитик. У тебя есть портфель кандидатов {json.dumps(candidates)}.
 Для каждого тикера добавь:
 - reason: краткое объяснение (1–2 предложения), почему акция выбрана
-- forecast: JSON с target_date (через 6 месяцев) и target_price (разумный прогноз)
+- forecast: JSON с target_date (через 6 месяцев) и target_price
 
 Профиль инвестора: {profile}.
-Верни JSON вида:
-{{"symbols":[{{"symbol":"AAPL","reason":"...","forecast":{{"target_date":"2025-12-01","price":200}}}}]}}
+Верни JSON {{"symbols":[{{"symbol":"AAPL","reason":"...","forecast":{{"target_date":"2025-12-01","price":200}}}}]}}
     """
 
     try:
@@ -108,7 +115,7 @@ def annotate_with_ai(candidates, profile):
 # Построение портфеля
 # -------------------------
 def build_portfolio(profile: SimpleNamespace):
-    tickers = list(set(SP500_TICKERS + NASDAQ100_TICKERS))
+    tickers = load_tickers()
     results = []
 
     logging.info(f"Анализируем {len(tickers)} тикеров...")
@@ -122,16 +129,10 @@ def build_portfolio(profile: SimpleNamespace):
         logging.warning("Нет данных для анализа!")
         return []
 
-    # сортируем по score
     results.sort(key=lambda x: x["score"], reverse=True)
-
-    # топ-5
     top5 = results[:5]
-
-    # добавляем AI-аннотацию
     enriched = annotate_with_ai(top5, profile)
 
-    # timestamp
     for c in enriched:
         c["timestamp"] = datetime.utcnow().isoformat()
 
