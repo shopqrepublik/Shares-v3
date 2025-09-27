@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from datetime import datetime
 from types import SimpleNamespace
 
-# правильный импорт build_portfolio
 from app.routers.portfolio import build_portfolio as build_core
 
 # -------------------------
@@ -102,13 +101,19 @@ async def ai_annotate(candidates, profile):
                 for item in parsed["symbols"]:
                     ai_map[item.get("symbol")] = item
 
+            # аккуратно проходим кандидатов
+            safe = []
             for c in candidates:
-                sym = c["symbol"]
+                if not isinstance(c, dict):
+                    logging.warning(f"Skipping non-dict candidate: {c}")
+                    continue
+                sym = c.get("symbol")
                 if sym in ai_map:
                     c["reason"] = ai_map[sym].get("reason", "")
                     c["forecast"] = ai_map[sym].get("forecast", {})
+                safe.append(c)
 
-            return candidates
+            return safe
     except Exception as e:
         logging.error(f"AI annotation failed: {e}")
         return candidates
@@ -135,7 +140,7 @@ async def build_portfolio(request: Request):
     candidates = build_core(profile_obj)
     enriched = await ai_annotate(candidates, USER_PROFILE)
 
-    # 🛠 фикс: если вернул {"data": [...]}
+    # 🛠 фикс: обрабатываем все случаи
     if isinstance(enriched, dict) and "data" in enriched:
         enriched = enriched["data"]
 
@@ -143,12 +148,21 @@ async def build_portfolio(request: Request):
         try:
             enriched = json.loads(enriched)
         except Exception:
-            logging.error(f"Enriched portfolio is string and not JSON: {enriched}")
-            raise HTTPException(status_code=500, detail="AI response format error")
+            logging.error(f"Enriched is a plain string, cannot parse: {enriched}")
+            enriched = []
 
     if not isinstance(enriched, list):
         logging.error(f"Unexpected enriched type: {type(enriched)}, value: {enriched}")
-        raise HTTPException(status_code=500, detail="Invalid portfolio format")
+        enriched = []
+
+    # фильтруем только словари
+    valid = []
+    for c in enriched:
+        if not isinstance(c, dict):
+            logging.warning(f"Skipping non-dict item: {c}")
+            continue
+        valid.append(c)
+    enriched = valid
 
     global CURRENT_PORTFOLIO
     CURRENT_PORTFOLIO = [
@@ -163,7 +177,7 @@ async def build_portfolio(request: Request):
             "forecast": c.get("forecast"),
             "timestamp": datetime.utcnow().isoformat()
         }
-        for c in enriched if isinstance(c, dict)
+        for c in enriched
     ]
 
     return {"data": CURRENT_PORTFOLIO}
