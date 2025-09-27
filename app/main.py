@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import httpx
+import subprocess
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -104,6 +105,7 @@ async def ai_annotate(candidates, profile):
             safe = []
             for c in candidates:
                 if not isinstance(c, dict):
+                    logging.warning(f"Skipping non-dict candidate: {c}")
                     continue
                 sym = c.get("symbol")
                 if sym in ai_map:
@@ -138,7 +140,6 @@ async def build_portfolio(request: Request):
     candidates = build_core(profile_obj)
     enriched = await ai_annotate(candidates, USER_PROFILE)
 
-    # 🛠 обработка случаев {"data": [...]}, строк или других форматов
     if isinstance(enriched, dict) and "data" in enriched:
         enriched = enriched["data"]
 
@@ -153,13 +154,17 @@ async def build_portfolio(request: Request):
         logging.error(f"Unexpected enriched type: {type(enriched)}, value: {enriched}")
         enriched = []
 
-    # гарантируем, что формируем портфель
-    global CURRENT_PORTFOLIO
-    CURRENT_PORTFOLIO = []
+    valid = []
     for c in enriched:
         if not isinstance(c, dict):
+            logging.warning(f"Skipping non-dict item: {c}")
             continue
-        CURRENT_PORTFOLIO.append({
+        valid.append(c)
+    enriched = valid
+
+    global CURRENT_PORTFOLIO
+    CURRENT_PORTFOLIO = [
+        {
             "symbol": c.get("symbol"),
             "shares": c.get("quantity", 0),
             "price": c.get("price", 0.0),
@@ -169,7 +174,9 @@ async def build_portfolio(request: Request):
             "reason": c.get("reason"),
             "forecast": c.get("forecast"),
             "timestamp": datetime.utcnow().isoformat()
-        })
+        }
+        for c in enriched
+    ]
 
     return {"data": CURRENT_PORTFOLIO}
 
@@ -190,6 +197,25 @@ async def check_keys(request: Request):
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+# -------------------------
+# Новый эндпоинт для обновления тикеров
+# -------------------------
+@app.post("/update_tickers")
+async def update_tickers(request: Request):
+    check_api_key(request)
+    try:
+        result = subprocess.run(
+            ["python", "app/update_tickers.py"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        logging.info(f"[UPDATE_TICKERS] {result.stdout}")
+        return {"status": "ok", "output": result.stdout}
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Update tickers failed: {e.stderr}")
+        raise HTTPException(status_code=500, detail=f"Update failed: {e.stderr}")
 
 @app.options("/debug_cors")
 async def debug_cors_options():
