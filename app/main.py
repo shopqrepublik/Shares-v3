@@ -171,3 +171,4 @@ async def holdings(request: Request):
     check_api_key(request)
     portfolio = user_portfolios.get("portfolio", [])
     return {"holdings": portfolio}
+
