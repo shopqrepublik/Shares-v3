@@ -40,17 +40,9 @@ class OnboardRequest(BaseModel):
     horizon: Optional[str] = None
     experience: Optional[str] = None
 
-class Position(BaseModel):
-    symbol: str
-    quantity: int
-    price: float
-    allocation: float
-    reason: Optional[str] = None
-    forecast: Optional[Dict[str, Any]] = None
-
 # ---------------- MEMORY STORAGE ----------------
 user_profiles: Dict[str, Any] = {}
-user_portfolios: Dict[str, List[Position]] = {}
+user_portfolios: Dict[str, List[Dict[str, Any]]] = {}
 
 # ---------------- AI ANNOTATION ----------------
 def ai_annotate(selected: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -147,31 +139,35 @@ async def build_portfolio(request: Request):
         logging.info(f"  {a['symbol']} — reason={a.get('reason')}, forecast={a.get('forecast')}")
 
     # 3. Объединяем данные
-    positions = []
     budget = profile["budget"]
     alloc = budget / len(selected)
 
+    enriched = []
     for s in selected:
         extra = next((a for a in annotated if a["symbol"] == s["symbol"]), {})
         qty = int(alloc // s["price"]) if s["price"] else 0
-        positions.append(Position(
-            symbol=s["symbol"],
-            quantity=qty,
-            price=s["price"],
-            allocation=round(alloc/budget, 2),
-            reason=extra.get("reason"),
-            forecast=extra.get("forecast")
-        ))
+        enriched.append({
+            "symbol": s["symbol"],
+            "price": s["price"],
+            "score": s.get("score"),
+            "momentum": s.get("momentum"),
+            "forecast_metric": s.get("forecast"),
+            "pattern": s.get("pattern"),
+            "quantity": qty,
+            "allocation": round(alloc/budget, 2),
+            "reason": extra.get("reason"),
+            "forecast": extra.get("forecast")
+        })
 
-    user_portfolios["portfolio"] = positions
+    user_portfolios["portfolio"] = enriched
     logging.info("[PORTFOLIO BUILT] Итоговый портфель:")
-    for p in positions:
-        logging.info(f"  {p.symbol} — qty={p.quantity}, alloc={p.allocation}, forecast={p.forecast}")
+    for p in enriched:
+        logging.info(f"  {p['symbol']} — qty={p['quantity']}, alloc={p['allocation']}, score={p['score']}")
 
-    return {"status": "ok", "portfolio": [p.dict() for p in positions]}
+    return {"status": "ok", "portfolio": enriched}
 
 @app.get("/portfolio/holdings")
 async def holdings(request: Request):
     check_api_key(request)
     portfolio = user_portfolios.get("portfolio", [])
-    return {"holdings": [p.dict() for p in portfolio]}
+    return {"holdings": portfolio}
