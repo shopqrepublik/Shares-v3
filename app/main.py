@@ -10,7 +10,8 @@ from pydantic import BaseModel
 from datetime import datetime
 from types import SimpleNamespace
 
-from portfolio import build_portfolio as build_core
+# ✅ правильный импорт
+from app.routers.portfolio import build_portfolio as build_core
 
 # -------------------------
 # Настройка FastAPI
@@ -215,3 +216,4 @@ async def debug_cors_get():
         content={"message": "CORS GET OK"},
         headers={"Access-Control-Allow-Origin": "*"},
     )
+
