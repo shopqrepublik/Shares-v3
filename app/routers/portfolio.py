@@ -1,4 +1,3 @@
-# app/routers/portfolio.py
 import os
 import logging
 import psycopg2
