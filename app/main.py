@@ -1,25 +1,33 @@
 import os
 import logging
-import json
-import httpx
-import psycopg2
-import pandas as pd
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from datetime import datetime
 from types import SimpleNamespace
 
-# Импортируем ядро портфеля
-from app.routers.portfolio import build_portfolio as build_core
+import psycopg2
+import httpx
+import pandas as pd
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-# -------------------------
-# Настройка FastAPI
-# -------------------------
-app = FastAPI()
+from app.portfolio import build_portfolio as build_core
+from app.update_tickers import fetch_sp500, fetch_nasdaq100
+
+# --- Логирование ---
 logging.basicConfig(level=logging.INFO)
 
+# --- Переменные окружения ---
+API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
+DB_URL = os.getenv("DATABASE_URL", "")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+
+# --- FastAPI ---
+app = FastAPI()
+
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,154 +36,114 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
-# Переменные окружения
-# -------------------------
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
-DB_URL = os.getenv("DATABASE_URL")
-
-USER_PROFILE = None
+# --- Глобальные ---
+USER_PROFILE = {}
 CURRENT_PORTFOLIO = []
 SKIPPED_TICKERS = []
 
-# -------------------------
-# Проверка API ключа
-# -------------------------
-def check_api_key(request: Request):
-    key = request.headers.get("X-API-Key")
-    if not key or key != API_PASSWORD:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-# -------------------------
-# Pydantic модели
-# -------------------------
+# --- Модели ---
 class OnboardRequest(BaseModel):
     budget: float
     risk_level: str
     goals: str
-    horizon: str
-    knowledge: str
+    horizon: str = "6m"
+    knowledge: str = "beginner"
 
-# -------------------------
-# AI аннотации
-# -------------------------
-async def ai_annotate(candidates, profile):
+# --- Хелперы ---
+def check_api_key(request: Request):
+    api_key = request.headers.get("X-API-Key")
+    if api_key != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+async def ai_annotate(portfolio):
+    """AI-аннотации через OpenAI"""
     if not OPENAI_API_KEY:
-        logging.warning("OPENAI_API_KEY not set, skipping AI annotation")
-        return candidates
+        return portfolio
 
-    prompt = f"""
-    У тебя есть список акций: {candidates}.
-    Для каждой бумаги добавь:
-    - reason: объяснение выбора
-    - forecast: JSON с target_date (6m) и target_price
-    Профиль инвестора: {profile}.
-    Верни JSON {{"symbols":[{{"symbol":"AAPL","reason":"...","forecast":{{"target_date":"2025-12-01","price":200}}}}]}}.
-    """
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                },
-            )
-            data = resp.json()
-            raw = data["choices"][0]["message"]["content"]
-            logging.info(f"[AI RAW OUTPUT] {raw}")
-
-            raw = raw.strip().replace("```json", "").replace("```", "")
-
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        for stock in portfolio:
+            prompt = f"""
+            Компания: {stock['symbol']}
+            Score={stock['score']}, Momentum={stock['momentum']}, Pattern={stock['pattern']}
+            Объясни в 1–2 предложениях, почему эта акция в портфеле,
+            и сделай прогноз на 6 месяцев.
+            """
             try:
-                parsed = json.loads(raw)
-            except Exception:
-                logging.error(f"AI response is not valid JSON: {raw}")
-                return candidates
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {"role": "system", "content": "Ты финансовый аналитик."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": 120,
+                        "temperature": 0.7,
+                    },
+                )
+                text = resp.json()["choices"][0]["message"]["content"].strip()
+                stock["reason"] = text.split("\n")[0]
+                stock["forecast"] = text.split("\n")[-1]
+            except Exception as e:
+                logging.error(f"[AI] Ошибка аннотации {stock['symbol']}: {e}")
+                stock["reason"] = "—"
+                stock["forecast"] = "—"
+    return portfolio
 
-            ai_map = {}
-            if isinstance(parsed, dict) and "symbols" in parsed:
-                for item in parsed["symbols"]:
-                    ai_map[item.get("symbol")] = item
-
-            safe = []
-            for c in candidates:
-                if not isinstance(c, dict):
-                    continue
-                sym = c.get("symbol")
-                if sym in ai_map:
-                    c["reason"] = ai_map[sym].get("reason", "")
-                    c["forecast"] = ai_map[sym].get("forecast", {})
-                safe.append(c)
-
-            return safe
-    except Exception as e:
-        logging.error(f"AI annotation failed: {e}")
-        return candidates
-
-# -------------------------
-# Роуты
-# -------------------------
+# --- Маршруты ---
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 @app.post("/onboard")
-async def onboard(req: OnboardRequest, request: Request):
+async def onboard(data: OnboardRequest, request: Request):
     check_api_key(request)
     global USER_PROFILE
-    USER_PROFILE = req.dict()
+    USER_PROFILE = data.dict()
     logging.info(f"[ONBOARD] {USER_PROFILE}")
     return {"status": "ok", "profile": USER_PROFILE}
 
 @app.post("/portfolio/build")
 async def build_portfolio_api(request: Request):
     check_api_key(request)
-    if not USER_PROFILE:
-        raise HTTPException(status_code=400, detail="User profile not set. Run /onboard first.")
+    data = await request.json()
+    profile_obj = SimpleNamespace(**data)
 
-    profile_obj = SimpleNamespace(**USER_PROFILE)
-
-    portfolio, skipped = build_core(profile_obj)
-    enriched = await ai_annotate(portfolio, USER_PROFILE)
+    logging.info(f"[BUILD] Profile: {data}")
 
     global CURRENT_PORTFOLIO, SKIPPED_TICKERS
-    CURRENT_PORTFOLIO = enriched
-    SKIPPED_TICKERS = skipped
+    CURRENT_PORTFOLIO, SKIPPED_TICKERS = build_core(profile_obj)
+
+    if CURRENT_PORTFOLIO and OPENAI_API_KEY:
+        CURRENT_PORTFOLIO = await ai_annotate(CURRENT_PORTFOLIO)
 
     return {
         "portfolio": CURRENT_PORTFOLIO,
         "skipped": SKIPPED_TICKERS,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
 @app.get("/portfolio/holdings")
-async def get_holdings(request: Request):
+async def portfolio_holdings(request: Request):
     check_api_key(request)
-    return {"portfolio": CURRENT_PORTFOLIO, "skipped": SKIPPED_TICKERS}
+    return {
+        "portfolio": CURRENT_PORTFOLIO,
+        "skipped": SKIPPED_TICKERS,
+    }
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
     check_api_key(request)
     return {
+        "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing",
         "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
         "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing",
-        "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing",
-        "DATABASE_URL": "set" if DB_URL else "missing"
+        "DATABASE_URL": "set" if DB_URL else "missing",
     }
 
-# -------------------------
-# Update Tickers → PostgreSQL
-# -------------------------
+# --- Новый /update_tickers ---
 @app.post("/update_tickers")
 async def update_tickers(request: Request):
     check_api_key(request)
@@ -184,18 +152,12 @@ async def update_tickers(request: Request):
         raise HTTPException(status_code=500, detail="DATABASE_URL not set")
 
     try:
-        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]["Symbol"].tolist()
-        nasdaq_tables = pd.read_html("https://en.wikipedia.org/wiki/NASDAQ-100")
-        nasdaq100 = []
-        for t in nasdaq_tables:
-            if "Ticker" in t.columns or "Symbol" in t.columns:
-                col = "Ticker" if "Ticker" in t.columns else "Symbol"
-                nasdaq100 = t[col].dropna().tolist()
-                break
+        sp500 = fetch_sp500()
+        nasdaq100 = fetch_nasdaq100()
 
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor()
-        cur.execute("DELETE FROM tickers")  # очищаем таблицу
+        cur.execute("DELETE FROM tickers")
 
         for sym in sp500:
             cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("SP500", sym.strip()))
@@ -214,29 +176,18 @@ async def update_tickers(request: Request):
             "nasdaq100_count": len(nasdaq100),
             "examples_sp500": sp500[:5],
             "examples_nasdaq100": nasdaq100[:5],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
+
     except Exception as e:
-        logging.error(f"Update tickers failed: {e}")
+        logging.error(f"[UPDATE_TICKERS] ❌ {e}")
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
-# -------------------------
-# CORS debug
-# -------------------------
-@app.options("/debug_cors")
-async def debug_cors_options():
-    return JSONResponse(
-        content={"message": "CORS preflight OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        },
-    )
+# --- CORS debug ---
+@app.get("/test-cors")
+async def test_cors():
+    return {"message": "CORS OK"}
 
-@app.get("/debug_cors")
-async def debug_cors_get():
-    return JSONResponse(
-        content={"message": "CORS GET OK"},
-        headers={"Access-Control-Allow-Origin": "*"},
-    )
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str = None):
+    return {}
