@@ -2,13 +2,14 @@ import os
 import logging
 import json
 import httpx
-import subprocess
+import psycopg2
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
 from types import SimpleNamespace
+import pandas as pd
 
 # ✅ правильный импорт
 from app.routers.portfolio import build_portfolio as build_core
@@ -34,6 +35,7 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
+DB_URL = os.getenv("DATABASE_URL")
 
 USER_PROFILE = None
 CURRENT_PORTFOLIO = []
@@ -180,25 +182,61 @@ async def check_keys(request: Request):
     return {
         "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
         "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing",
-        "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing"
+        "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing",
+        "DATABASE_URL": "set" if DB_URL else "missing"
     }
 
+# -------------------------
+# Update Tickers в PostgreSQL
+# -------------------------
 @app.post("/update_tickers")
 async def update_tickers(request: Request):
     check_api_key(request)
-    try:
-        result = subprocess.run(
-            ["python", "app/update_tickers.py"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        logging.info(f"[UPDATE_TICKERS] {result.stdout}")
-        return {"status": "ok", "output": result.stdout}
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Update tickers failed: {e.stderr}")
-        raise HTTPException(status_code=500, detail=f"Update failed: {e.stderr}")
 
+    if not DB_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+
+    try:
+        # Загружаем тикеры с Wikipedia
+        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]["Symbol"].tolist()
+        nasdaq_tables = pd.read_html("https://en.wikipedia.org/wiki/NASDAQ-100")
+        nasdaq100 = []
+        for t in nasdaq_tables:
+            if "Ticker" in t.columns or "Symbol" in t.columns:
+                col = "Ticker" if "Ticker" in t.columns else "Symbol"
+                nasdaq100 = t[col].dropna().tolist()
+                break
+
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tickers")  # очищаем таблицу
+
+        for sym in sp500:
+            cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("SP500", sym.strip()))
+        for sym in nasdaq100:
+            cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("NASDAQ100", sym.strip()))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        logging.info(f"[UPDATE_TICKERS] ✅ S&P500={len(sp500)}, NASDAQ100={len(nasdaq100)}")
+
+        return {
+            "status": "ok",
+            "sp500_count": len(sp500),
+            "nasdaq100_count": len(nasdaq100),
+            "examples_sp500": sp500[:5],
+            "examples_nasdaq100": nasdaq100[:5],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logging.error(f"Update tickers failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+
+# -------------------------
+# CORS debug
+# -------------------------
 @app.options("/debug_cors")
 async def debug_cors_options():
     return JSONResponse(
@@ -216,4 +254,3 @@ async def debug_cors_get():
         content={"message": "CORS GET OK"},
         headers={"Access-Control-Allow-Origin": "*"},
     )
-
