@@ -5,6 +5,7 @@ import yfinance as yf
 import time
 import logging
 import openai
+from types import SimpleNamespace
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
@@ -21,11 +22,7 @@ DATA_DIR = "app/data"
 # Нормализация тикеров
 # -------------------------
 def normalize_ticker(ticker: str) -> str:
-    """
-    Приводим тикер к формату Yahoo Finance:
-    - заменяем точки на дефисы (BRK.B → BRK-B)
-    - убираем пробелы
-    """
+    """Приводим тикер к формату Yahoo Finance"""
     if "." in ticker:
         ticker = ticker.replace(".", "-")
     return ticker.strip().upper()
@@ -34,7 +31,6 @@ def normalize_ticker(ticker: str) -> str:
 # Безопасная загрузка yfinance
 # -------------------------
 def safe_download(ticker, period="6mo", interval="1d", retries=3, delay=1):
-    """Безопасная загрузка данных для тикера через yfinance"""
     for attempt in range(retries):
         try:
             data = yf.download(ticker, period=period, interval=interval, progress=False)
@@ -42,7 +38,7 @@ def safe_download(ticker, period="6mo", interval="1d", retries=3, delay=1):
                 logging.info(f"[YF] {ticker} ✅ {len(data)} bars")
                 return data
         except Exception as e:
-            logging.warning(f"[YF] {ticker} ❌ попытка {attempt+1} не удалась: {e}")
+            logging.warning(f"[YF] {ticker} ❌ попытка {attempt+1}: {e}")
             time.sleep(delay)
     logging.error(f"[YF] {ticker} пропущен (нет данных)")
     return None
@@ -60,9 +56,8 @@ def load_tickers():
     except Exception as e:
         logging.error(f"[TICKERS] Ошибка загрузки JSON: {e}")
 
-    # нормализуем тикеры
     tickers = [normalize_ticker(t) for t in tickers]
-    return list(set(tickers))  # уникальные тикеры
+    return list(set(tickers))
 
 # -------------------------
 # Метрики
@@ -80,7 +75,7 @@ def compute_metrics(hist):
         return None
 
 # -------------------------
-# AI-аннотация (опционально)
+# AI-аннотация
 # -------------------------
 def ai_annotate(ticker, metrics):
     if not OPENAI_API_KEY:
@@ -113,12 +108,22 @@ def ai_annotate(ticker, metrics):
 # Построение портфеля
 # -------------------------
 def build_portfolio(profile):
-    budget = profile.get("budget", 1000)
-    tickers = load_tickers()
+    # Поддержка dict и SimpleNamespace
+    if isinstance(profile, SimpleNamespace):
+        profile = vars(profile)
 
+    if not isinstance(profile, dict):
+        raise ValueError("profile должен быть dict или SimpleNamespace")
+
+    budget = profile.get("budget", 1000)
+    risk_level = profile.get("risk_level", "medium")
+    goals = profile.get("goals", "grow")
+
+    tickers = load_tickers()
     portfolio = []
     skipped = []
-    for ticker in random.sample(tickers, min(30, len(tickers))):  # берем 30 случайных
+
+    for ticker in random.sample(tickers, min(30, len(tickers))):
         hist = safe_download(ticker)
         if hist is None:
             skipped.append(ticker)
@@ -129,7 +134,7 @@ def build_portfolio(profile):
             continue
         annotations = ai_annotate(ticker, metrics)
         last_price = hist["Close"][-1]
-        qty = max(1, int(budget * 0.05 // last_price))  # до 5% бюджета в одну бумагу
+        qty = max(1, int(budget * 0.05 // last_price))
         portfolio.append({
             "ticker": ticker,
             "price": float(last_price),
@@ -141,7 +146,6 @@ def build_portfolio(profile):
             "forecast": annotations["forecast"],
         })
 
-    # сортировка по score
     portfolio = sorted(portfolio, key=lambda x: x["score"], reverse=True)[:5]
     logging.info(f"[PORTFOLIO] готово: {len(portfolio)} акций, пропущено {len(skipped)}")
     return {"portfolio": portfolio, "skipped": skipped}
