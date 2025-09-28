@@ -1,48 +1,49 @@
-import os
-import json
-import requests
 import pandas as pd
-from io import StringIO
+import psycopg2
+import os
+from psycopg2.extras import execute_values
 
-DATA_DIR = "app/data"
+DB_URL = os.getenv("DATABASE_URL")
 
 def fetch_sp500_tickers():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    html = requests.get(url, headers=headers).text
-    table = pd.read_html(StringIO(html))[0]
-    return table["Symbol"].dropna().tolist()
+    table = pd.read_html(url)[0]
+    return table["Symbol"].tolist()
 
 def fetch_nasdaq100_tickers():
     url = "https://en.wikipedia.org/wiki/NASDAQ-100"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    html = requests.get(url, headers=headers).text
-    tables = pd.read_html(StringIO(html))
+    table = pd.read_html(url)[3]
+    return table["Ticker"].tolist()
 
-    # ищем таблицу, где есть колонка с тикерами
-    for table in tables:
-        for col in table.columns:
-            if col in ["Ticker", "Symbol"]:
-                return table[col].dropna().tolist()
+def save_to_db(index_name, tickers):
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tickers WHERE index_name = %s", (index_name,))
+    execute_values(
+        cur,
+        "INSERT INTO tickers (index_name, symbol) VALUES %s",
+        [(index_name, t) for t in tickers]
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    raise ValueError("Не найдена колонка Ticker или Symbol в таблицах NASDAQ-100")
-
-def save_tickers():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
+def update_tickers():
     sp500 = fetch_sp500_tickers()
-    nasdaq100 = fetch_nasdaq100_tickers()
+    nasdaq = fetch_nasdaq100_tickers()
 
-    with open(os.path.join(DATA_DIR, "sp500.json"), "w") as f:
-        json.dump(sp500, f)
+    save_to_db("SP500", sp500)
+    save_to_db("NASDAQ100", nasdaq)
 
-    with open(os.path.join(DATA_DIR, "nasdaq100.json"), "w") as f:
-        json.dump(nasdaq100, f)
-
-    print(f"✅ Обновлено: {len(sp500)} S&P500 и {len(nasdaq100)} NASDAQ100")
-    print("Примеры:")
-    print("S&P500 →", sp500[:5])
-    print("NASDAQ100 →", nasdaq100[:5])
+    return {
+        "sp500": len(sp500),
+        "nasdaq100": len(nasdaq),
+        "examples": {
+            "sp500": sp500[:5],
+            "nasdaq100": nasdaq[:5]
+        }
+    }
 
 if __name__ == "__main__":
-    save_tickers()
+    print(update_tickers())
+
