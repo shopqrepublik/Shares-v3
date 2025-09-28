@@ -10,12 +10,13 @@ from pydantic import BaseModel
 from datetime import datetime
 from types import SimpleNamespace
 
-from app.routers.portfolio import build_portfolio as build_core
+from portfolio import build_portfolio as build_core
 
 # -------------------------
 # Настройка FastAPI
 # -------------------------
 app = FastAPI()
+logging.basicConfig(level=logging.INFO)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,11 +31,12 @@ app.add_middleware(
 # -------------------------
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
-API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+API_PASSWORD = os.getenv("API_PASSWORD", "SuperSecret123")
 
 USER_PROFILE = None
 CURRENT_PORTFOLIO = []
+SKIPPED_TICKERS = []
 
 # -------------------------
 # Проверка API ключа
@@ -105,7 +107,6 @@ async def ai_annotate(candidates, profile):
             safe = []
             for c in candidates:
                 if not isinstance(c, dict):
-                    logging.warning(f"Skipping non-dict candidate: {c}")
                     continue
                 sym = c.get("symbol")
                 if sym in ai_map:
@@ -121,6 +122,10 @@ async def ai_annotate(candidates, profile):
 # -------------------------
 # Роуты
 # -------------------------
+@app.get("/ping")
+async def ping():
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
 @app.post("/onboard")
 async def onboard(req: OnboardRequest, request: Request):
     check_api_key(request)
@@ -130,39 +135,17 @@ async def onboard(req: OnboardRequest, request: Request):
     return {"status": "ok", "profile": USER_PROFILE}
 
 @app.post("/portfolio/build")
-async def build_portfolio(request: Request):
+async def build_portfolio_api(request: Request):
     check_api_key(request)
     if not USER_PROFILE:
         raise HTTPException(status_code=400, detail="User profile not set. Run /onboard first.")
 
     profile_obj = SimpleNamespace(**USER_PROFILE)
 
-    candidates = build_core(profile_obj)
-    enriched = await ai_annotate(candidates, USER_PROFILE)
+    portfolio, skipped = build_core(profile_obj)
+    enriched = await ai_annotate(portfolio, USER_PROFILE)
 
-    if isinstance(enriched, dict) and "data" in enriched:
-        enriched = enriched["data"]
-
-    if isinstance(enriched, str):
-        try:
-            enriched = json.loads(enriched)
-        except Exception:
-            logging.error(f"Enriched is a plain string, cannot parse: {enriched}")
-            enriched = []
-
-    if not isinstance(enriched, list):
-        logging.error(f"Unexpected enriched type: {type(enriched)}, value: {enriched}")
-        enriched = []
-
-    valid = []
-    for c in enriched:
-        if not isinstance(c, dict):
-            logging.warning(f"Skipping non-dict item: {c}")
-            continue
-        valid.append(c)
-    enriched = valid
-
-    global CURRENT_PORTFOLIO
+    global CURRENT_PORTFOLIO, SKIPPED_TICKERS
     CURRENT_PORTFOLIO = [
         {
             "symbol": c.get("symbol"),
@@ -175,15 +158,20 @@ async def build_portfolio(request: Request):
             "forecast": c.get("forecast"),
             "timestamp": datetime.utcnow().isoformat()
         }
-        for c in enriched
+        for c in enriched if isinstance(c, dict)
     ]
+    SKIPPED_TICKERS = skipped
 
-    return {"data": CURRENT_PORTFOLIO}
+    return {
+        "portfolio": CURRENT_PORTFOLIO,
+        "skipped": SKIPPED_TICKERS,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 @app.get("/portfolio/holdings")
 async def get_holdings(request: Request):
     check_api_key(request)
-    return {"data": CURRENT_PORTFOLIO}
+    return {"portfolio": CURRENT_PORTFOLIO, "skipped": SKIPPED_TICKERS}
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
@@ -194,13 +182,6 @@ async def check_keys(request: Request):
         "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing"
     }
 
-@app.get("/ping")
-async def ping():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
-
-# -------------------------
-# Новый эндпоинт для обновления тикеров
-# -------------------------
 @app.post("/update_tickers")
 async def update_tickers(request: Request):
     check_api_key(request)
