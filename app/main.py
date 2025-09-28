@@ -3,15 +3,15 @@ import logging
 import json
 import httpx
 import psycopg2
+import pandas as pd
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
 from types import SimpleNamespace
-import pandas as pd
 
-# ✅ правильный импорт
+# Импортируем ядро портфеля
 from app.routers.portfolio import build_portfolio as build_core
 
 # -------------------------
@@ -149,20 +149,7 @@ async def build_portfolio_api(request: Request):
     enriched = await ai_annotate(portfolio, USER_PROFILE)
 
     global CURRENT_PORTFOLIO, SKIPPED_TICKERS
-    CURRENT_PORTFOLIO = [
-        {
-            "symbol": c.get("symbol"),
-            "shares": c.get("quantity", 0),
-            "price": c.get("price", 0.0),
-            "score": c.get("score", 0),
-            "momentum": c.get("momentum"),
-            "pattern": c.get("pattern"),
-            "reason": c.get("reason"),
-            "forecast": c.get("forecast"),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        for c in enriched if isinstance(c, dict)
-    ]
+    CURRENT_PORTFOLIO = enriched
     SKIPPED_TICKERS = skipped
 
     return {
@@ -187,7 +174,7 @@ async def check_keys(request: Request):
     }
 
 # -------------------------
-# Update Tickers в PostgreSQL
+# Update Tickers → PostgreSQL
 # -------------------------
 @app.post("/update_tickers")
 async def update_tickers(request: Request):
@@ -197,7 +184,6 @@ async def update_tickers(request: Request):
         raise HTTPException(status_code=500, detail="DATABASE_URL not set")
 
     try:
-        # Загружаем тикеры с Wikipedia
         sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]["Symbol"].tolist()
         nasdaq_tables = pd.read_html("https://en.wikipedia.org/wiki/NASDAQ-100")
         nasdaq100 = []
