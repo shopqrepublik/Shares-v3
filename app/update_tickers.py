@@ -1,42 +1,60 @@
-# app/update_tickers.py
-import pandas as pd
-import psycopg2
 import os
+import psycopg2
+import pandas as pd
+import requests
+from io import StringIO
+from datetime import datetime
 
-DB_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# --- Функции для загрузки тикеров ---
-def fetch_sp500_tickers():
+def fetch_sp500():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
-    return table["Symbol"].tolist()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        html = requests.get(url, headers=headers, timeout=20).text
+        table = pd.read_html(StringIO(html))[0]
+        return table["Symbol"].tolist()
+    except Exception as e:
+        print(f"[WARN] Wikipedia S&P500 failed: {e}")
+        # fallback to GitHub CSV
+        url_csv = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
+        df = pd.read_csv(url_csv)
+        return df["Symbol"].tolist()
 
-def fetch_nasdaq100_tickers():
+def fetch_nasdaq100():
     url = "https://en.wikipedia.org/wiki/NASDAQ-100"
-    tables = pd.read_html(url)
-    # таблица с тикерами обычно первая или вторая
-    for t in tables:
-        if "Ticker" in t.columns or "Symbol" in t.columns:
-            col = "Ticker" if "Ticker" in t.columns else "Symbol"
-            return t[col].dropna().tolist()
-    return []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        html = requests.get(url, headers=headers, timeout=20).text
+        tables = pd.read_html(StringIO(html))
+        # ищем таблицу с тикерами
+        for tbl in tables:
+            cols = [c.lower() for c in tbl.columns]
+            if "ticker" in cols or "symbol" in cols:
+                colname = "Ticker" if "Ticker" in tbl.columns else "Symbol"
+                return tbl[colname].tolist()
+        raise ValueError("Не найдена таблица с тикерами NASDAQ-100")
+    except Exception as e:
+        print(f"[WARN] Wikipedia NASDAQ100 failed: {e}")
+        # fallback: статичный CSV (например nasdaqtrader.com)
+        url_csv = "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed.csv"
+        df = pd.read_csv(url_csv)
+        return df["Symbol"].tolist()
 
-# --- Обновление базы ---
-def update_tickers():
-    sp500 = fetch_sp500_tickers()
-    nasdaq100 = fetch_nasdaq100_tickers()
-
-    conn = psycopg2.connect(DB_URL)
+def save_to_db(sp500, nasdaq100):
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
 
-    # очищаем старые записи
+    # чистим старые тикеры
     cur.execute("DELETE FROM tickers")
 
-    # вставляем новые
+    now = datetime.utcnow()
     for sym in sp500:
-        cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("SP500", sym.strip()))
+        cur.execute("INSERT INTO tickers (index_name, symbol, updated_at) VALUES (%s, %s, %s)",
+                    ("SP500", sym, now))
     for sym in nasdaq100:
-        cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("NASDAQ100", sym.strip()))
+        cur.execute("INSERT INTO tickers (index_name, symbol, updated_at) VALUES (%s, %s, %s)",
+                    ("NASDAQ100", sym, now))
 
     conn.commit()
     cur.close()
@@ -47,8 +65,11 @@ def update_tickers():
         "nasdaq100_count": len(nasdaq100),
         "examples_sp500": sp500[:5],
         "examples_nasdaq100": nasdaq100[:5],
+        "timestamp": now.isoformat()
     }
 
 if __name__ == "__main__":
-    result = update_tickers()
+    sp500 = fetch_sp500()
+    nasdaq100 = fetch_nasdaq100()
+    result = save_to_db(sp500, nasdaq100)
     print("✅ Обновлено:", result)
