@@ -1,8 +1,10 @@
 import os
 import psycopg2
 import requests
+import time
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
+from typing import Optional
 
 # =========================
 # Конфигурация
@@ -17,13 +19,9 @@ def get_pg_connection():
     return psycopg2.connect(DB_URL)
 
 # =========================
-# Нормализация тикеров для Finnhub
+# Нормализация тикеров
 # =========================
 def normalize_symbol(symbol: str) -> str:
-    """
-    Приводим тикеры к формату, который принимает Finnhub.
-    Например: BRK-B → BRK.B, BF-B → BF.B
-    """
     mapping = {
         "BRK-B": "BRK.B",
         "BF-B": "BF.B"
@@ -31,21 +29,29 @@ def normalize_symbol(symbol: str) -> str:
     return mapping.get(symbol, symbol)
 
 # =========================
-# Получение цены акции через Finnhub
+# Получение цены через Finnhub
 # =========================
-def get_price_from_finnhub(symbol: str):
+def get_price_from_finnhub(symbol: str) -> Optional[float]:
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
     try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if "c" in data and data["c"] > 0:
-            return data["c"]
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 429:
+            print(f"[RATE LIMIT] Too many requests. Pausing for 60s...")
+            time.sleep(60)
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if not data or "c" not in data:
+            print(f"[EMPTY] {symbol}: {data}")
+            return None
+        if data["c"] and data["c"] > 0:
+            return float(data["c"])
         else:
-            print(f"[Finnhub] Нет цены для {symbol}, ответ={data}")
+            print(f"[ZERO PRICE] {symbol}: {data}")
+            return None
     except Exception as e:
-        print(f"[Finnhub] Ошибка для {symbol}: {e}")
-    return None
+        print(f"[ERROR] {symbol}: {e}")
+        return None
 
 # =========================
 # Построение портфеля
@@ -54,15 +60,15 @@ def build_portfolio():
     conn = get_pg_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # Загружаем список тикеров (берем до 50 для теста)
-    cur.execute("SELECT symbol FROM tickers LIMIT 50;")
+    # Берем список тикеров (например 100 для теста)
+    cur.execute("SELECT symbol FROM tickers LIMIT 100;")
     symbols = [row["symbol"] for row in cur.fetchall()]
 
     portfolio = []
     weight = round(1 / len(symbols), 6) if symbols else 0
 
-    for symbol in symbols:
-        norm_symbol = normalize_symbol(symbol)  # нормализуем для Finnhub
+    for i, symbol in enumerate(symbols, start=1):
+        norm_symbol = normalize_symbol(symbol)
         price = get_price_from_finnhub(norm_symbol)
         if price:
             portfolio.append({"symbol": symbol, "price": price, "weight": weight})
@@ -79,6 +85,11 @@ def build_portfolio():
             )
         else:
             print(f"[❌] Нет данных для {symbol}")
+
+        # троттлинг каждые 50 запросов
+        if i % 50 == 0:
+            print(f"[INFO] Processed {i} symbols, pausing for 60s to respect API limits")
+            time.sleep(60)
 
     conn.commit()
     cur.close()
