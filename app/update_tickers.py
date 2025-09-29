@@ -7,7 +7,7 @@ DB_URL = os.getenv("DATABASE_URL")
 MARKETSTACK_KEY = os.getenv("MARKETSTACK_KEY")
 
 def fetch_tickers(exchange_code):
-    url = "http://api.marketstack.com/v1/tickers"
+    url = "url = "https://api.marketstack.com/v1/tickers"
     params = {
         "access_key": MARKETSTACK_KEY,
         "exchange": exchange_code,
