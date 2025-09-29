@@ -3,45 +3,37 @@ import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import openai
+from openai import OpenAI
 
-# Импорты из update_tickers.py
 from app.update_tickers import update_tickers as update_tickers_job
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 
-# --- API Key ---
+# --- API keys ---
 API_KEY = os.getenv("API_KEY", "SuperSecret123")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DB_URL = os.getenv("DATABASE_URL", "")
 
-# --- OpenAI ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+# --- OpenAI client ---
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- FastAPI app ---
 app = FastAPI()
 
 # --- CORS ---
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://wealth-dashboard-ai.lovable.app",
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[
+        "https://wealth-dashboard-ai.lovable.app",  # фронт
+        "http://localhost:5173",                   # локальная разработка
+        "http://127.0.0.1:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Helpers ---
-def check_api_key(request: Request):
-    api_key = request.headers.get("X-API-Key")
-    if api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
 # --- Models ---
 class OnboardRequest(BaseModel):
@@ -51,60 +43,86 @@ class OnboardRequest(BaseModel):
     horizon: str
     knowledge: str
 
-# --- Public endpoints ---
+
+# --- Helpers ---
+def check_api_key(request: Request):
+    api_key = request.headers.get("X-API-Key")
+    if api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# --- Routes ---
 @app.get("/ping")
-def ping():
+async def ping():
     return {"status": "ok"}
 
+
 @app.get("/health")
-def health():
+async def health():
     return {"status": "healthy"}
 
-# --- Protected endpoints ---
+
 @app.post("/onboard")
-async def onboard(request: Request, body: OnboardRequest):
+async def onboard(req: OnboardRequest, request: Request):
     check_api_key(request)
-    return {"status": "ok", "profile": body.dict()}
+    # Здесь можно сохранить профиль в базу, пока просто возвращаем
+    return {"status": "ok", "profile": req.dict()}
+
 
 @app.post("/portfolio/build")
-async def build_portfolio(request: Request, body: OnboardRequest):
+async def build_portfolio(request: Request):
     check_api_key(request)
+    body = await request.json()
 
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+    budget = body.get("budget", "Not specified")
+    risk = body.get("risk", "Not specified")
+    goals = body.get("goals", "Not specified")
+    horizon = body.get("horizon", "Not specified")
+    knowledge = body.get("knowledge", "Not specified")
 
-    prompt = f"""
-    Build an investment portfolio for:
-    - Budget: {body.budget}
-    - Risk Level: {body.risk_level}
-    - Goals: {body.goals}
-    - Horizon: {body.horizon}
-    - Knowledge: {body.knowledge}
-    """
+    messages = [
+        {"role": "system", "content": "You are an AI financial advisor."},
+        {"role": "user", "content": f"""
+        Build an investment portfolio for the following profile:
+        Budget: {budget}
+        Risk level: {risk}
+        Goals: {goals}
+        Horizon: {horizon}
+        Knowledge: {knowledge}
+        """}
+    ]
 
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500
         )
-        return {"portfolio": response.choices[0].message["content"].strip()}
+        content = response.choices[0].message.content
+        return {"status": "ok", "portfolio": content}
     except Exception as e:
         logging.error(f"[BUILD_PORTFOLIO] ❌ {e}")
-        raise HTTPException(status_code=500, detail=f"Portfolio build failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to build portfolio: {str(e)}")
+
 
 @app.get("/portfolio/holdings")
-async def get_holdings(request: Request):
+async def holdings(request: Request):
     check_api_key(request)
-    return {"holdings": []}  # TODO: заменить на выборку из БД
+    # TODO: достать из базы список тикеров или сохранённый портфель
+    return {"status": "ok", "holdings": []}
+
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
     check_api_key(request)
     return {
-        "API_KEY": bool(API_KEY),
-        "OPENAI_API_KEY": bool(OPENAI_API_KEY),
-        "DATABASE_URL": bool(DB_URL),
+        "status": "ok",
+        "api_key_set": bool(API_KEY),
+        "openai_key_set": bool(OPENAI_API_KEY),
+        "db_url_set": bool(DB_URL),
     }
+
 
 @app.post("/update_tickers")
 async def update_tickers_endpoint(request: Request):
@@ -113,15 +131,10 @@ async def update_tickers_endpoint(request: Request):
     if not DB_URL:
         raise HTTPException(status_code=500, detail="DATABASE_URL not set")
 
-    try:
-        result = update_tickers_job()
-        logging.info(f"[UPDATE_TICKERS] ✅ {result}")
-        return {"status": "ok", **result}
-    except Exception as e:
-        logging.error(f"[UPDATE_TICKERS] ❌ {e}")
-        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+    result = update_tickers_job()
+    if result["status"] == "error":
+        logging.error(f"[UPDATE_TICKERS] ❌ {result['detail']}")
+        raise HTTPException(status_code=500, detail=f"Update failed: {result['detail']}")
 
-# --- Test CORS ---
-@app.options("/{full_path:path}")
-async def preflight_handler(full_path: str):
-    return {}
+    logging.info(f"[UPDATE_TICKERS] ✅ {result}")
+    return result
