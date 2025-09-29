@@ -49,6 +49,17 @@ def check_api_key(request: Request):
 async def ping():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
+# --- Проверка API Keys ---
+@app.get("/check_keys")
+async def check_keys(request: Request):
+    """
+    Проверка наличия API ключей (например, API_KEY из .env).
+    Возвращает ok, если ключ задан.
+    """
+    api_key = os.getenv("API_KEY")
+    if api_key:
+        return {"status": "ok", "api_key_set": True}
+    return {"status": "error", "api_key_set": False}
 
 # --- Update tickers ---
 def update_tickers_from_sources():
