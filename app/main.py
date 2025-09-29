@@ -15,8 +15,16 @@ DB_URL = os.getenv("DATABASE_URL")
 API_KEY = os.getenv("API_KEY", "changeme")
 
 # --- Подключение к БД ---
+import re
+
 def get_pg_connection():
-    return psycopg2.connect(DB_URL)
+    """
+    Создаёт подключение к PostgreSQL.
+    Если DATABASE_URL содержит '+psycopg2', убираем его,
+    потому что psycopg2 не понимает такой формат.
+    """
+    dsn = re.sub(r"\+psycopg2", "", DB_URL)
+    return psycopg2.connect(dsn)
 
 # --- FastAPI ---
 app = FastAPI()
