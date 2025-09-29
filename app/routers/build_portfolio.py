@@ -1,70 +1,71 @@
 import os
 import psycopg2
-import pandas as pd
 import requests
 from psycopg2.extras import RealDictCursor
+from datetime import datetime
 
 # =========================
-# Настройки
+# Конфигурация
 # =========================
-DATABASE_URL = os.getenv("DATABASE_URL")
+DB_URL = os.getenv("DATABASE_URL")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
 # =========================
-# Функция для подключения к БД
+# Подключение к базе
 # =========================
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+def get_pg_connection():
+    return psycopg2.connect(DB_URL)
 
 # =========================
-# Получение цены из Finnhub
+# Нормализация тикеров для Finnhub
 # =========================
-def get_price_from_finnhub(symbol):
+def normalize_symbol(symbol: str) -> str:
+    """
+    Приводим тикеры к формату, который принимает Finnhub.
+    Например: BRK-B → BRK.B, BF-B → BF.B
+    """
+    mapping = {
+        "BRK-B": "BRK.B",
+        "BF-B": "BF.B"
+    }
+    return mapping.get(symbol, symbol)
+
+# =========================
+# Получение цены акции через Finnhub
+# =========================
+def get_price_from_finnhub(symbol: str):
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
-
-        # Ответ Finnhub:
-        # {
-        #   "c": 261.74,   # Current price
-        #   "h": 263.31,   # High price of the day
-        #   "l": 260.68,   # Low price of the day
-        #   "o": 261.07,   # Open price of the day
-        #   "pc": 259.45   # Previous close price
-        # }
-
         if "c" in data and data["c"] > 0:
             return data["c"]
         else:
-            print(f"[FINNHUB] Пустой ответ для {symbol}: {data}")
-            return None
-
+            print(f"[Finnhub] Нет цены для {symbol}, ответ={data}")
     except Exception as e:
-        print(f"[FINNHUB] Ошибка получения цены для {symbol}: {e}")
-        return None
+        print(f"[Finnhub] Ошибка для {symbol}: {e}")
+    return None
 
 # =========================
 # Построение портфеля
 # =========================
-def build_portfolio(risk_profile="Balanced"):
-    conn = get_db_connection()
-    cur = conn.cursor()
+def build_portfolio():
+    conn = get_pg_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # Забираем тикеры из таблицы tickers
-    cur.execute("SELECT symbol FROM tickers WHERE index_name IN ('SP500', 'NASDAQ100') LIMIT 50;")
-    rows = cur.fetchall()
-    symbols = [row["symbol"] for row in rows]
+    # Загружаем список тикеров (берем до 50 для теста)
+    cur.execute("SELECT symbol FROM tickers LIMIT 50;")
+    symbols = [row["symbol"] for row in cur.fetchall()]
 
     portfolio = []
-    weight = 1 / len(symbols) if symbols else 0
+    weight = round(1 / len(symbols), 6) if symbols else 0
 
     for symbol in symbols:
-        price = get_price_from_finnhub(symbol)
+        norm_symbol = normalize_symbol(symbol)  # нормализуем для Finnhub
+        price = get_price_from_finnhub(norm_symbol)
         if price:
             portfolio.append({"symbol": symbol, "price": price, "weight": weight})
-            # сохраняем в holdings
             cur.execute(
                 """
                 INSERT INTO portfolio_holdings (symbol, weight, last_price, updated_at)
@@ -76,16 +77,18 @@ def build_portfolio(risk_profile="Balanced"):
                 """,
                 (symbol, weight, price),
             )
+        else:
+            print(f"[❌] Нет данных для {symbol}")
 
     conn.commit()
     cur.close()
     conn.close()
 
+    print(f"[PORTFOLIO] Построено {len(portfolio)} бумаг из {len(symbols)}")
     return portfolio
 
 # =========================
-# Запуск для теста
+# Запуск
 # =========================
 if __name__ == "__main__":
-    portfolio = build_portfolio("Balanced")
-    print(pd.DataFrame(portfolio))
+    build_portfolio()
