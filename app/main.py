@@ -1,158 +1,109 @@
 import os
 import logging
-from datetime import datetime
-from types import SimpleNamespace
-
-import psycopg2
-import httpx
-import pandas as pd
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import openai
 
-from app.routers.portfolio import build_portfolio as build_core
-from app.update_tickers import fetch_sp500, fetch_nasdaq100
+# Импорты из вашего update_tickers.py
+from app.update_tickers import fetch_sp500, fetch_nasdaq100, save_to_db
 
-# --- Логирование ---
+# --- Logging ---
 logging.basicConfig(level=logging.INFO)
 
-# --- Переменные окружения ---
+# --- API Key ---
 API_KEY = os.getenv("API_KEY", "SuperSecret123")
 DB_URL = os.getenv("DATABASE_URL", "")
 
+# --- OpenAI ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
 
-# --- FastAPI ---
+# --- FastAPI app ---
 app = FastAPI()
 
 # --- CORS ---
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://wealth-dashboard-ai.lovable.app",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://wealth-dashboard-ai.lovable.app",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Глобальные ---
-USER_PROFILE = {}
-CURRENT_PORTFOLIO = []
-SKIPPED_TICKERS = []
-
-# --- Модели ---
-class OnboardRequest(BaseModel):
-    budget: float
-    risk_level: str
-    goals: str
-    horizon: str = "6m"
-    knowledge: str = "beginner"
-
-# --- Хелперы ---
+# --- Helpers ---
 def check_api_key(request: Request):
-    # Пропускаем публичные эндпоинты
-    public_paths = ["/ping", "/health", "/docs", "/openapi.json", "/redoc"]
-    if request.url.path in public_paths:
-        return
     api_key = request.headers.get("X-API-Key")
     if api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-async def ai_annotate(portfolio):
-    """AI-аннотации через OpenAI"""
-    if not OPENAI_API_KEY:
-        return portfolio
+# --- Models ---
+class OnboardRequest(BaseModel):
+    budget: float
+    risk_level: str
+    goals: str
+    horizon: str
+    knowledge: str
 
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    async with httpx.AsyncClient(timeout=20) as client:
-        for stock in portfolio:
-            prompt = f"""
-            Компания: {stock['symbol']}
-            Score={stock['score']}, Momentum={stock['momentum']}, Pattern={stock['pattern']}
-            Объясни в 1–2 предложениях, почему эта акция в портфеле,
-            и сделай прогноз на 6 месяцев.
-            """
-            try:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers=headers,
-                    json={
-                        "model": "gpt-4o-mini",
-                        "messages": [
-                            {"role": "system", "content": "Ты финансовый аналитик."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "max_tokens": 120,
-                        "temperature": 0.7,
-                    },
-                )
-                text = resp.json()["choices"][0]["message"]["content"].strip()
-                stock["reason"] = text.split("\n")[0]
-                stock["forecast"] = text.split("\n")[-1]
-            except Exception as e:
-                logging.error(f"[AI] Ошибка аннотации {stock['symbol']}: {e}")
-                stock["reason"] = "—"
-                stock["forecast"] = "—"
-    return portfolio
-
-# --- Маршруты ---
+# --- Public endpoints ---
 @app.get("/ping")
-async def ping():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+def ping():
+    return {"status": "ok"}
 
 @app.get("/health")
-async def health():
-    return {"status": "healthy", "time": datetime.utcnow().isoformat()}
+def health():
+    return {"status": "healthy"}
 
+# --- Protected endpoints ---
 @app.post("/onboard")
-async def onboard(data: OnboardRequest, request: Request):
+async def onboard(request: Request, body: OnboardRequest):
     check_api_key(request)
-    global USER_PROFILE
-    USER_PROFILE = data.dict()
-    logging.info(f"[ONBOARD] {USER_PROFILE}")
-    return {"status": "ok", "profile": USER_PROFILE}
+    return {"status": "ok", "profile": body.dict()}
 
 @app.post("/portfolio/build")
-async def build_portfolio_api(request: Request):
+async def build_portfolio(request: Request, body: OnboardRequest):
     check_api_key(request)
-    data = await request.json()
-    profile_obj = SimpleNamespace(**data)
 
-    logging.info(f"[BUILD] Profile: {data}")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
 
-    global CURRENT_PORTFOLIO, SKIPPED_TICKERS
-    CURRENT_PORTFOLIO, SKIPPED_TICKERS = build_core(profile_obj)
+    prompt = f"""
+    Build an investment portfolio for:
+    - Budget: {body.budget}
+    - Risk Level: {body.risk_level}
+    - Goals: {body.goals}
+    - Horizon: {body.horizon}
+    - Knowledge: {body.knowledge}
+    """
 
-    if CURRENT_PORTFOLIO and OPENAI_API_KEY:
-        CURRENT_PORTFOLIO = await ai_annotate(CURRENT_PORTFOLIO)
-
-    return {
-        "portfolio": CURRENT_PORTFOLIO,
-        "skipped": SKIPPED_TICKERS,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return {"portfolio": response.choices[0].message["content"].strip()}
+    except Exception as e:
+        logging.error(f"[BUILD_PORTFOLIO] ❌ {e}")
+        raise HTTPException(status_code=500, detail=f"Portfolio build failed: {str(e)}")
 
 @app.get("/portfolio/holdings")
-async def portfolio_holdings(request: Request):
+async def get_holdings(request: Request):
     check_api_key(request)
-    return {
-        "portfolio": CURRENT_PORTFOLIO,
-        "skipped": SKIPPED_TICKERS,
-    }
+    return {"holdings": []}  # Заглушка, можно заменить реальной логикой
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
     check_api_key(request)
     return {
-        "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing",
-        "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
-        "ALPACA_API_SECRET": "set" if ALPACA_API_SECRET else "missing",
-        "DATABASE_URL": "set" if DB_URL else "missing",
+        "API_KEY": bool(API_KEY),
+        "OPENAI_API_KEY": bool(OPENAI_API_KEY),
+        "DATABASE_URL": bool(DB_URL),
     }
 
 @app.post("/update_tickers")
@@ -165,39 +116,14 @@ async def update_tickers(request: Request):
     try:
         sp500 = fetch_sp500()
         nasdaq100 = fetch_nasdaq100()
-
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM tickers")
-
-        for sym in sp500:
-            cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("SP500", sym.strip()))
-        for sym in nasdaq100:
-            cur.execute("INSERT INTO tickers (index_name, symbol) VALUES (%s, %s)", ("NASDAQ100", sym.strip()))
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        logging.info(f"[UPDATE_TICKERS] ✅ S&P500={len(sp500)}, NASDAQ100={len(nasdaq100)}")
-
-        return {
-            "status": "ok",
-            "sp500_count": len(sp500),
-            "nasdaq100_count": len(nasdaq100),
-            "examples_sp500": sp500[:5],
-            "examples_nasdaq100": nasdaq100[:5],
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
+        result = save_to_db(sp500, nasdaq100)
+        logging.info(f"[UPDATE_TICKERS] ✅ {result}")
+        return {"status": "ok", **result}
     except Exception as e:
         logging.error(f"[UPDATE_TICKERS] ❌ {e}")
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
-@app.get("/test-cors")
-async def test_cors():
-    return {"message": "CORS OK"}
-
-@app.options("/{rest_of_path:path}")
-async def preflight_handler(rest_of_path: str = None):
+# --- Test CORS ---
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str):
     return {}
