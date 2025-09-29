@@ -10,9 +10,14 @@ router = APIRouter()
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
 OTHER_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; PortfolioBot/1.0; +https://example.com)"
+}
+
 def fetch_tickers_from_url(url: str):
     """Скачивает список тикеров с NASDAQ HTTP-зеркала"""
-    resp = requests.get(url)
+    print(f"[DEBUG] Fetching: {url}")
+    resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
     lines = resp.text.splitlines()
     symbols = []
@@ -20,17 +25,24 @@ def fetch_tickers_from_url(url: str):
         parts = line.split("|")
         if len(parts) > 1 and parts[0] not in ("Symbol", "File Creation Time", ""):
             symbols.append(parts[0].strip())
+    print(f"[DEBUG] {url} → {len(symbols)} tickers")
     return symbols
 
 def fetch_sp500():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    print("[DEBUG] Fetching S&P500 from Wikipedia")
     tables = pd.read_html(url)
-    return tables[0]["Symbol"].tolist()
+    symbols = tables[0]["Symbol"].tolist()
+    print(f"[DEBUG] S&P500 → {len(symbols)} tickers")
+    return symbols
 
 def fetch_nasdaq100():
     url = "https://en.wikipedia.org/wiki/NASDAQ-100"
+    print("[DEBUG] Fetching NASDAQ100 from Wikipedia")
     tables = pd.read_html(url)
-    return tables[4]["Ticker"].tolist()
+    symbols = tables[4]["Ticker"].tolist()
+    print(f"[DEBUG] NASDAQ100 → {len(symbols)} tickers")
+    return symbols
 
 @router.post("/update_tickers")
 def update_tickers():
@@ -71,12 +83,15 @@ def update_tickers():
         cur.close()
         conn.close()
 
-        return {
+        result = {
             "status": "ok",
             "total": len(all_symbols),
             "sp500_count": len(sp500),
             "nasdaq100_count": len(nasdaq100)
         }
+        print(f"[DEBUG] Update complete: {result}")
+        return result
 
     except Exception as e:
+        print(f"[ERROR] update_tickers failed: {e}")
         return {"status": "error", "detail": str(e)}
