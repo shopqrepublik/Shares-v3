@@ -5,8 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import openai
 
-# Импорты из вашего update_tickers.py
-from app.update_tickers import fetch_sp500, fetch_nasdaq100, save_to_db
+# Импорты из update_tickers.py
+from app.update_tickers import update_tickers as update_tickers_job
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -95,7 +95,7 @@ async def build_portfolio(request: Request, body: OnboardRequest):
 @app.get("/portfolio/holdings")
 async def get_holdings(request: Request):
     check_api_key(request)
-    return {"holdings": []}  # Заглушка, можно заменить реальной логикой
+    return {"holdings": []}  # TODO: заменить на выборку из БД
 
 @app.get("/check_keys")
 async def check_keys(request: Request):
@@ -107,16 +107,14 @@ async def check_keys(request: Request):
     }
 
 @app.post("/update_tickers")
-async def update_tickers(request: Request):
+async def update_tickers_endpoint(request: Request):
     check_api_key(request)
 
     if not DB_URL:
         raise HTTPException(status_code=500, detail="DATABASE_URL not set")
 
     try:
-        sp500 = fetch_sp500()
-        nasdaq100 = fetch_nasdaq100()
-        result = save_to_db(sp500, nasdaq100)
+        result = update_tickers_job()
         logging.info(f"[UPDATE_TICKERS] ✅ {result}")
         return {"status": "ok", **result}
     except Exception as e:
