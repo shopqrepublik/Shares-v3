@@ -6,7 +6,7 @@ from fastapi import APIRouter
 
 router = APIRouter()
 
-# ✅ HTTPS вместо FTP
+# Источники
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
 OTHER_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 
@@ -69,16 +69,18 @@ def update_tickers():
         conn = get_pg_connection()
         cur = conn.cursor()
 
-        # Создание таблицы
+        # Создание таблицы (index_name теперь допускает NULL)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS tickers (
-            symbol TEXT PRIMARY KEY,
-            index_name TEXT
+            id SERIAL PRIMARY KEY,
+            symbol TEXT UNIQUE,
+            index_name TEXT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
 
         # Чистим старые данные
-        cur.execute("TRUNCATE tickers")
+        cur.execute("TRUNCATE tickers RESTART IDENTITY")
 
         # Записываем новые
         for sym in all_symbols:
@@ -87,7 +89,10 @@ def update_tickers():
                 index_name = "SP500"
             elif sym in nasdaq100:
                 index_name = "NASDAQ100"
-            cur.execute("INSERT INTO tickers (symbol, index_name) VALUES (%s, %s)", (sym, index_name))
+            cur.execute(
+                "INSERT INTO tickers (symbol, index_name) VALUES (%s, %s)",
+                (sym, index_name)
+            )
 
         conn.commit()
         cur.close()
