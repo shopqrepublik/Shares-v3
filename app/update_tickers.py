@@ -5,17 +5,25 @@ from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 def fetch_sp500():
-    # DataHub CSV (обновляется автоматически)
-    url_csv = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
-    df = pd.read_csv(url_csv)
+    """
+    Загружает список тикеров S&P 500 с Wikipedia.
+    """
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    df = pd.read_html(url, header=0)[0]
     return df["Symbol"].dropna().tolist()
 
+
 def fetch_nasdaq100():
-    # Альтернативный CSV (NASDAQ listings)
-    url_csv = "https://pkgstore.datahub.io/core/nasdaq-listings/nasdaq-listed_csv/data/nasdaq-listed_csv.csv"
-    df = pd.read_csv(url_csv)
-    return df["Symbol"].dropna().tolist()
+    """
+    Загружает список тикеров NASDAQ-100 с Wikipedia.
+    """
+    url = "https://en.wikipedia.org/wiki/NASDAQ-100"
+    # на странице несколько таблиц, таблица с тикерами обычно 4-я
+    df = pd.read_html(url, header=0)[4]
+    return df["Ticker"].dropna().tolist()
+
 
 def save_to_db(sp500, nasdaq100):
     conn = psycopg2.connect(DATABASE_URL)
@@ -47,6 +55,7 @@ def save_to_db(sp500, nasdaq100):
         "examples_nasdaq100": nasdaq100[:5],
         "timestamp": now.isoformat(),
     }
+
 
 if __name__ == "__main__":
     sp500 = fetch_sp500()
