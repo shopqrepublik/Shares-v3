@@ -1,92 +1,170 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import requests
+import pandas as pd
+import yfinance as yf
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-from update_tickers import update_tickers_from_sources
-from build_portfolio import build_and_save_portfolio
-
-# ---------------------------------------------------------
+# --------------------
 # Настройки
-# ---------------------------------------------------------
-DB_URL = os.getenv("DATABASE_URL")
-API_KEY = os.getenv("API_KEY", "SuperSecret123")
-
-app = FastAPI()
-
-# Логирование
+# --------------------
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Разрешим CORS для фронта
+DB_URL = os.getenv("DATABASE_URL")
+API_KEY = os.getenv("API_KEY", "changeme")
+
+app = FastAPI(title="Wealth Dashboard AI")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # для тестов можно оставить *
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------
-# Вспомогательные функции
-# ---------------------------------------------------------
+
 def get_pg_connection():
     return psycopg2.connect(DB_URL)
 
-def check_api_key(request: Request):
-    key = request.headers.get("X-API-Key")
-    if key != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
 
-# ---------------------------------------------------------
-# Эндпоинты
-# ---------------------------------------------------------
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Wealth Dashboard API is running"}
+def check_api_key(request: Request):
+    api_key = request.headers.get("x-api-key")
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+# --------------------
+# Тикеры
+# --------------------
+def update_tickers_from_sources():
+    """Загружаем тикеры из NASDAQ + SP500 + NASDAQ100"""
+    all_tickers = []
+
+    # SP500
+    sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(sp500_url)
+    sp500 = tables[0]["Symbol"].tolist()
+    for sym in sp500:
+        all_tickers.append(("SP500", sym))
+
+    # NASDAQ100
+    nasdaq100_url = "https://en.wikipedia.org/wiki/NASDAQ-100"
+    tables = pd.read_html(nasdaq100_url)
+    nasdaq100 = tables[3]["Ticker"].tolist()
+    for sym in nasdaq100:
+        all_tickers.append(("NASDAQ100", sym))
+
+    logger.info(f"[update_tickers] SP500={len(sp500)}, NASDAQ100={len(nasdaq100)}")
+
+    # Сохраняем в базу
+    conn = get_pg_connection()
+    cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE tickers;")
+    for idx, sym in all_tickers:
+        cur.execute(
+            "INSERT INTO tickers (index_name, symbol, updated_at) VALUES (%s, %s, NOW())",
+            (idx, sym),
+        )
+    conn.commit()
+    conn.close()
+
+    return {"status": "ok", "total": len(all_tickers), "sp500_count": len(sp500), "nasdaq100_count": len(nasdaq100)}
+
+
+# --------------------
+# Построение портфеля
+# --------------------
+def build_and_save_portfolio():
+    conn = get_pg_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT symbol FROM tickers WHERE index_name='SP500' LIMIT 50;")
+    symbols = [r[0] for r in cur.fetchall()]
+    conn.close()
+
+    portfolio = []
+
+    for sym in symbols:
+        try:
+            data = yf.download(sym, period="6mo", interval="1d", progress=False)
+            if len(data) < 30:
+                continue
+
+            price = data["Close"].iloc[-1]
+            momentum = (price / data["Close"].iloc[0]) - 1
+
+            sma50 = data["Close"].rolling(50).mean().iloc[-1]
+            sma200 = data["Close"].rolling(200).mean().iloc[-1] if len(data) >= 200 else None
+            pattern = "Golden Cross" if sma200 and sma50 > sma200 else "Normal"
+
+            score = momentum
+            portfolio.append(
+                {
+                    "symbol": sym,
+                    "price": float(price),
+                    "momentum": float(momentum),
+                    "pattern": pattern,
+                    "score": float(score),
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[build_portfolio] skip {sym}: {e}")
+
+    # топ-5
+    top = sorted(portfolio, key=lambda x: x["score"], reverse=True)[:5]
+
+    # сохраняем
+    conn = get_pg_connection()
+    cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE portfolio_holdings;")
+    for row in top:
+        cur.execute(
+            """
+            INSERT INTO portfolio_holdings (symbol, price, momentum, pattern, weight, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            """,
+            (row["symbol"], row["price"], row["momentum"], row["pattern"], 1 / len(top)),
+        )
+    conn.commit()
+    conn.close()
+
+    return {"status": "ok", "portfolio": top}
+
+
+# --------------------
+# API эндпоинты
+# --------------------
+@app.get("/ping")
+async def ping():
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
 
 @app.post("/update_tickers")
 async def update_tickers(request: Request):
     check_api_key(request)
-    try:
-        stats = update_tickers_from_sources(DB_URL)
-        logging.info(f"[UPDATE_TICKERS] ✅ {stats}")
-        return {"status": "ok", **stats}
-    except Exception as e:
-        logging.error(f"[UPDATE_TICKERS] ❌ {e}")
-        raise HTTPException(status_code=500, detail=f"Update failed: {e}")
+    return update_tickers_from_sources()
+
 
 @app.post("/portfolio/build")
 async def build_portfolio(request: Request):
     check_api_key(request)
-    try:
-        portfolio = build_and_save_portfolio(DB_URL)
-        logging.info(f"[BUILD_PORTFOLIO] ✅ {portfolio}")
-        return {"status": "ok", "portfolio": portfolio}
-    except Exception as e:
-        logging.error(f"[BUILD_PORTFOLIO] ❌ {e}")
-        raise HTTPException(status_code=500, detail=f"Build failed: {e}")
+    return build_and_save_portfolio()
+
 
 @app.get("/portfolio/holdings")
-async def holdings(request: Request):
+async def get_holdings(request: Request):
     check_api_key(request)
-    try:
-        conn = get_pg_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            SELECT id, symbol, weight, price, momentum, pattern, updated_at
-            FROM portfolio_holdings
-            ORDER BY id
-        """)
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        return {"status": "ok", "holdings": rows}
-    except Exception as e:
-        logging.error(f"[HOLDINGS] ❌ {e}")
-        raise HTTPException(status_code=500, detail=f"Holdings failed: {e}")
+    conn = get_pg_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        "SELECT id, symbol, price, momentum, pattern, weight, updated_at FROM portfolio_holdings ORDER BY id;"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return {"status": "ok", "holdings": rows}
