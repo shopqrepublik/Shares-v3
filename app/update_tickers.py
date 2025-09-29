@@ -1,68 +1,66 @@
 import os
-import psycopg2
 import requests
-from datetime import datetime
+import psycopg2
+from psycopg2.extras import execute_values
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-FMP_API_KEY = os.getenv("FMP_API_KEY")  # добавьте в Railway Variables
+API_KEY = os.getenv("FMP_API_KEY")
+DB_URL = os.getenv("DATABASE_URL")
 
-
-def fetch_sp500():
+def fetch_all_tickers():
     """
-    Получаем список компаний S&P 500 через Financial Modeling Prep API
+    Загружает все акции с FMP (Free Plan).
+    Фильтрует только NYSE и NASDAQ, исключает нулевые цены.
     """
-    url = f"https://financialmodelingprep.com/api/v3/sp500_constituent?apikey={FMP_API_KEY}"
-    resp = requests.get(url, timeout=20)
+    url = f"https://financialmodelingprep.com/api/v3/stock/list?apikey={API_KEY}"
+    resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    return [item["symbol"] for item in data if "symbol" in item]
+
+    tickers = [
+        item["symbol"]
+        for item in data
+        if item.get("exchangeShortName") in ("NYSE", "NASDAQ") and item.get("price", 0) > 0
+    ]
+
+    return tickers
 
 
-def fetch_nasdaq100():
+def save_to_db(tickers):
     """
-    Получаем список компаний NASDAQ-100 через Financial Modeling Prep API
+    Сохраняет тикеры в таблицу tickers.
+    Полностью очищает таблицу перед вставкой новых данных.
     """
-    url = f"https://financialmodelingprep.com/api/v3/nasdaq_constituent?apikey={FMP_API_KEY}"
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    return [item["symbol"] for item in data if "symbol" in item]
+    if not DB_URL:
+        raise RuntimeError("DATABASE_URL not set")
 
-
-def save_to_db(sp500, nasdaq100):
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
 
-    # чистим старые тикеры
-    cur.execute("DELETE FROM tickers")
+    # создаём таблицу если её нет
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tickers (
+            symbol TEXT PRIMARY KEY
+        )
+    """)
 
-    now = datetime.utcnow()
-    for sym in sp500:
-        cur.execute(
-            "INSERT INTO tickers (index_name, symbol, updated_at) VALUES (%s, %s, %s)",
-            ("SP500", sym, now),
-        )
-    for sym in nasdaq100:
-        cur.execute(
-            "INSERT INTO tickers (index_name, symbol, updated_at) VALUES (%s, %s, %s)",
-            ("NASDAQ100", sym, now),
-        )
+    # очищаем и вставляем новые
+    cur.execute("TRUNCATE tickers")
+    execute_values(cur, "INSERT INTO tickers (symbol) VALUES %s", [(t,) for t in tickers])
 
     conn.commit()
     cur.close()
     conn.close()
-
-    return {
-        "sp500_count": len(sp500),
-        "nasdaq100_count": len(nasdaq100),
-        "examples_sp500": sp500[:5],
-        "examples_nasdaq100": nasdaq100[:5],
-        "timestamp": now.isoformat(),
-    }
+    print(f"[UPDATE_TICKERS] ✅ Inserted {len(tickers)} tickers")
 
 
-if __name__ == "__main__":
-    sp500 = fetch_sp500()
-    nasdaq100 = fetch_nasdaq100()
-    result = save_to_db(sp500, nasdaq100)
-    print("✅ Обновлено:", result)
+def update_tickers():
+    """
+    Обновляет список тикеров: тянет с FMP и сохраняет в базу.
+    """
+    try:
+        tickers = fetch_all_tickers()
+        save_to_db(tickers)
+        return {"status": "ok", "count": len(tickers)}
+    except Exception as e:
+        print(f"[UPDATE_TICKERS] ❌ {e}")
+        return {"status": "error", "detail": str(e)}
