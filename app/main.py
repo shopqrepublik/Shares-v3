@@ -176,3 +176,14 @@ async def holdings(request: Request):
     cur.close()
     conn.close()
     return {"status": "ok", "holdings": rows}
+
+# --- Onboarding (анкета пользователя) ---
+@app.post("/onboard")
+async def onboard(request: Request):
+    """
+    Обрабатывает ответы анкеты пользователя (бюджет, цель, риск-профиль и т.д.)
+    Пока для теста просто возвращаем что приняли данные.
+    """
+    data = await request.json()
+    print("[ONBOARD] Получено:", data)
+    return {"status": "ok", "received": data}
