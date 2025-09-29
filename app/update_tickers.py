@@ -14,8 +14,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; PortfolioBot/1.0; +https://example.com)"
 }
 
+def get_pg_connection():
+    """Создание подключения к БД, автоматически убираем '+psycopg2'"""
+    raw_dsn = os.environ["DATABASE_URL"]
+    if raw_dsn.startswith("postgresql+psycopg2://"):
+        raw_dsn = raw_dsn.replace("postgresql+psycopg2://", "postgresql://", 1)
+    return psycopg2.connect(raw_dsn)
+
 def fetch_tickers_from_url(url: str):
-    """Скачивает список тикеров с NASDAQ HTTP-зеркала"""
     print(f"[DEBUG] Fetching: {url}")
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
@@ -60,7 +66,7 @@ def update_tickers():
         nasdaq100 = fetch_nasdaq100()
 
         # Подключение к БД
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+        conn = get_pg_connection()
         cur = conn.cursor()
 
         # Создание таблицы
