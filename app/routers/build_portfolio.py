@@ -1,18 +1,21 @@
 import os
 import psycopg2
 import yfinance as yf
+import pandas as pd
 import requests
-from fastapi import APIRouter
+from psycopg2.extras import RealDictCursor
 from datetime import datetime
 
-router = APIRouter()
+DB_URL = os.getenv("DATABASE_URL")
+FMP_API_KEY = os.getenv("FMP_API_KEY")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-FMP_API_KEY = os.getenv("FMP_API_KEY")  # ключ хранится в Railway → Variables
 
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+# --- Подключение к БД ---
+def get_pg_connection():
+    return psycopg2.connect(DB_URL)
 
+
+# --- Нормализация тикеров ---
 def normalize_symbol(symbol: str) -> str:
     """
     YFinance использует дефисы вместо точек.
@@ -20,116 +23,107 @@ def normalize_symbol(symbol: str) -> str:
     """
     return symbol.replace(".", "-")
 
-def get_price_from_fmp(symbol: str) -> float | None:
-    """
-    Получить цену через FMP (fallback, если yfinance не сработал).
-    """
+
+# --- Получение цены через FMP ---
+def get_price_from_fmp(symbol: str):
     if not FMP_API_KEY:
-        print("⚠️ Нет ключа FMP_API_KEY")
+        print(f"[FMP] ⚠️ Нет ключа FMP_API_KEY, пропускаю {symbol}")
+        return None
+    url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            print(f"[FMP] ❌ Ошибка API {resp.status_code} для {symbol}")
+            return None
+        data = resp.json()
+        if not data:
+            print(f"[FMP] ❌ Пустой ответ API для {symbol}")
+            return None
+        return data[0].get("price")
+    except Exception as e:
+        print(f"[FMP] ❌ Ошибка запроса для {symbol}: {e}")
         return None
 
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if isinstance(data, list) and len(data) > 0 and "price" in data[0]:
-            return float(data[0]["price"])
-        else:
-            print(f"❌ Ошибка API для {symbol}: пустой ответ {data}")
-    except Exception as e:
-        print(f"[FMP] Ошибка по {symbol}: {e}")
-    return None
 
-@router.post("/portfolio/build")
-async def build_portfolio():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+# --- Построение портфеля ---
+def build_and_save_portfolio():
+    conn = get_pg_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Берём тикеры из базы (SP500)
-        cur.execute("""
-            SELECT symbol 
-            FROM tickers 
-            WHERE index_name = 'SP500'
-            LIMIT 50;
-        """)
-        tickers = [row[0] for row in cur.fetchall()]
+    # 1. Берём тикеры из таблицы tickers (ограничим 50 для скорости)
+    cur.execute("SELECT symbol FROM tickers LIMIT 50;")
+    tickers = [row["symbol"] for row in cur.fetchall()]
+    print(f"[PORTFOLIO] Загружено {len(tickers)} тикеров из БД")
 
-        if not tickers:
-            return {"status": "error", "message": "Нет доступных тикеров"}
+    results = []
 
-        results = []
-
-        # 2. Аналитика: цена, momentum, SMA-паттерн
-        for sym in tickers:
-    try:
-        # нормализуем тикер (замена BRK.B -> BRK-B и т.п.)
-        norm_sym = normalize_symbol(sym)
-
-        # ⚡ пробуем через Yahoo Finance
+    # 2. Аналитика: цена, momentum, SMA-паттерн
+    for sym in tickers:
         try:
-            data = yf.download(norm_sym, period="6mo", progress=False)
-            if data.empty:
-                raise ValueError("Yahoo вернул пустые данные")
+            norm_sym = normalize_symbol(sym)
+
+            # --- пробуем через Yahoo Finance ---
+            try:
+                data = yf.download(norm_sym, period="6mo", progress=False)
+                if data.empty:
+                    raise ValueError("Yahoo вернул пустые данные")
+            except Exception as e:
+                print(f"[YF] Ошибка для {norm_sym}: {e}, пробую FMP API...")
+
+                # --- fallback через FMP ---
+                price = get_price_from_fmp(norm_sym)
+                if price is None:
+                    print(f"[FMP] ❌ Нет данных для {norm_sym}, пропускаю")
+                    continue
+                else:
+                    # создаём DataFrame с одной ценой
+                    data = pd.DataFrame({"Close": [price]})
+
+            # --- берём цену ---
+            price = data["Close"].iloc[-1]
+
+            # --- считаем momentum ---
+            momentum = 0.0
+            if len(data) > 1:
+                momentum = (price / data["Close"].iloc[0]) - 1
+
+            # --- определяем паттерн ---
+            pattern = "Golden Cross" if momentum > 0 else "Normal"
+
+            results.append({
+                "symbol": sym,
+                "price": float(price),
+                "momentum": float(momentum),
+                "pattern": pattern,
+                "score": float(momentum)  # пока score = momentum
+            })
+
+            print(f"[OK] {norm_sym}: цена={price:.2f}, momentum={momentum:.2%}")
+
         except Exception as e:
-            print(f"[YF] Ошибка для {norm_sym}: {e}, пробую FMP API...")
+            print(f"[ERROR] Не удалось обработать {sym}: {e}")
+            continue
 
-            # ⚡ пробуем через FMP API
-            price = get_price_from_fmp(norm_sym)
-            if price is None:
-                print(f"[FMP] ❌ Нет данных для {norm_sym}, пропускаю")
-                continue
-            else:
-                # создаём фейковый DataFrame с одной ценой
-                data = pd.DataFrame({"Close": [price]})
+    # 3. Выбираем топ-5 по score
+    top = sorted(results, key=lambda x: x["score"], reverse=True)[:5]
+    print(f"[PORTFOLIO] Выбрано {len(top)} тикеров в портфель")
 
-        # берём последнюю цену
-        price = data["Close"].iloc[-1]
-
-        # считаем доходность (если есть данные хотя бы за 2 точки)
-        momentum = 0.0
-        if len(data) > 1:
-            momentum = (price / data["Close"].iloc[0]) - 1
-
-        # вставляем в БД
+    # 4. Сохраняем в таблицу portfolio_holdings
+    cur.execute("DELETE FROM portfolio_holdings;")
+    for row in top:
         cur.execute("""
-            INSERT INTO portfolio_holdings (symbol, price, momentum, weight, updated_at)
-            VALUES (%s, %s, %s, %s, NOW())
-        """, (norm_sym, float(price), float(momentum), 0.0))
+            INSERT INTO portfolio_holdings (symbol, price, momentum, pattern, weight, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+        """, (
+            row["symbol"],
+            row["price"],
+            row["momentum"],
+            row["pattern"],
+            1 / len(top) if top else 0
+        ))
 
-        conn.commit()
-        print(f"[OK] {norm_sym}: цена={price:.2f}, momentum={momentum:.2%}")
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    except Exception as e:
-        print(f"[ERROR] Не удалось обработать {sym}: {e}")
-        conn.rollback()
-
-
-        # 3. Сортируем по score и берём топ-5
-        top = sorted(results, key=lambda x: x["score"], reverse=True)[:5]
-
-        # 4. Чистим старый портфель
-        cur.execute("DELETE FROM portfolio_holdings;")
-
-        # 5. Сохраняем новый портфель
-        weight = 1 / len(top)
-        for row in top:
-            cur.execute(
-                """
-                INSERT INTO portfolio_holdings (symbol, weight, price, momentum, pattern, updated_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                """,
-                (row["symbol"], weight, row["price"], row["momentum"], row["pattern"])
-            )
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        return {
-            "status": "success",
-            "portfolio": top
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return {"status": "ok", "portfolio": top, "updated_at": datetime.utcnow().isoformat()}
