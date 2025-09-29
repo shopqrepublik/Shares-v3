@@ -62,40 +62,48 @@ async def build_portfolio():
 
         # 2. Аналитика: цена, momentum, SMA-паттерн
         for sym in tickers:
-            try:
-                norm_sym = normalize_symbol(sym)
-                data = yf.download(norm_sym, period="6mo", interval="1d", progress=False)
+    try:
+        # нормализуем тикер (замена BRK.B -> BRK-B и т.п.)
+        norm_sym = normalize_symbol(sym)
 
-                if not data.empty:
-                    price = float(data["Close"].iloc[-1])
-                    momentum = (price - float(data["Close"].iloc[0])) / float(data["Close"].iloc[0])
-                    sma50 = data["Close"].rolling(50).mean().iloc[-1]
-                    sma200 = data["Close"].rolling(200).mean().iloc[-1]
-                    pattern = "Golden Cross" if sma50 > sma200 else "Normal"
-                else:
-                    # fallback через FMP
-                    price = get_price_from_fmp(sym)
-                    if not price:
-                        print(f"⚠️ Нет данных для {sym}")
-                        continue
-                    momentum, sma50, sma200, pattern = 0.0, 0.0, 0.0, "FMP"
+        # ⚡ пробуем через Yahoo Finance
+        try:
+            data = yf.download(norm_sym, period="6mo", progress=False)
+            if data.empty:
+                raise ValueError("Yahoo вернул пустые данные")
+        except Exception as e:
+            print(f"[YF] Ошибка для {norm_sym}: {e}, пробую FMP API...")
 
-                score = momentum * 100
-
-                results.append({
-                    "symbol": sym,  # сохраняем оригинальный тикер
-                    "price": round(price, 2),
-                    "momentum": round(momentum, 3),
-                    "pattern": pattern,
-                    "score": round(score, 2)
-                })
-
-            except Exception as e:
-                print(f"Ошибка по {sym}: {e}")
+            # ⚡ пробуем через FMP API
+            price = get_price_from_fmp(norm_sym)
+            if price is None:
+                print(f"[FMP] ❌ Нет данных для {norm_sym}, пропускаю")
                 continue
+            else:
+                # создаём фейковый DataFrame с одной ценой
+                data = pd.DataFrame({"Close": [price]})
 
-        if not results:
-            return {"status": "error", "message": "Не удалось рассчитать метрики"}
+        # берём последнюю цену
+        price = data["Close"].iloc[-1]
+
+        # считаем доходность (если есть данные хотя бы за 2 точки)
+        momentum = 0.0
+        if len(data) > 1:
+            momentum = (price / data["Close"].iloc[0]) - 1
+
+        # вставляем в БД
+        cur.execute("""
+            INSERT INTO portfolio_holdings (symbol, price, momentum, weight, updated_at)
+            VALUES (%s, %s, %s, %s, NOW())
+        """, (norm_sym, float(price), float(momentum), 0.0))
+
+        conn.commit()
+        print(f"[OK] {norm_sym}: цена={price:.2f}, momentum={momentum:.2%}")
+
+    except Exception as e:
+        print(f"[ERROR] Не удалось обработать {sym}: {e}")
+        conn.rollback()
+
 
         # 3. Сортируем по score и берём топ-5
         top = sorted(results, key=lambda x: x["score"], reverse=True)[:5]
