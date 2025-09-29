@@ -1,28 +1,32 @@
 import os
 import psycopg2
-import pandas as pd
+import requests
 from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+FMP_API_KEY = os.getenv("FMP_API_KEY")  # добавьте в Railway Variables
 
 
 def fetch_sp500():
     """
-    Загружает список тикеров S&P 500 с Wikipedia.
+    Получаем список компаний S&P 500 через Financial Modeling Prep API
     """
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    df = pd.read_html(url, header=0)[0]
-    return df["Symbol"].dropna().tolist()
+    url = f"https://financialmodelingprep.com/api/v3/sp500_constituent?apikey={FMP_API_KEY}"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    return [item["symbol"] for item in data if "symbol" in item]
 
 
 def fetch_nasdaq100():
     """
-    Загружает список тикеров NASDAQ-100 с Wikipedia.
+    Получаем список компаний NASDAQ-100 через Financial Modeling Prep API
     """
-    url = "https://en.wikipedia.org/wiki/NASDAQ-100"
-    # на странице несколько таблиц, таблица с тикерами обычно 4-я
-    df = pd.read_html(url, header=0)[4]
-    return df["Ticker"].dropna().tolist()
+    url = f"https://financialmodelingprep.com/api/v3/nasdaq_constituent?apikey={FMP_API_KEY}"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    return [item["symbol"] for item in data if "symbol" in item]
 
 
 def save_to_db(sp500, nasdaq100):
