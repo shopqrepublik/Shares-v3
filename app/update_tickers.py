@@ -21,7 +21,7 @@ def fetch_tickers_from_url(url: str):
     resp.raise_for_status()
     lines = resp.text.splitlines()
     symbols = []
-    for line in lines[1:]:  # пропускаем заголовок
+    for line in lines[1:]:
         parts = line.split("|")
         if len(parts) > 1 and parts[0] not in ("Symbol", "File Creation Time", ""):
             symbols.append(parts[0].strip())
@@ -31,7 +31,9 @@ def fetch_tickers_from_url(url: str):
 def fetch_sp500():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     print("[DEBUG] Fetching S&P500 from Wikipedia")
-    tables = pd.read_html(url)
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    tables = pd.read_html(resp.text)
     symbols = tables[0]["Symbol"].tolist()
     print(f"[DEBUG] S&P500 → {len(symbols)} tickers")
     return symbols
@@ -39,7 +41,9 @@ def fetch_sp500():
 def fetch_nasdaq100():
     url = "https://en.wikipedia.org/wiki/NASDAQ-100"
     print("[DEBUG] Fetching NASDAQ100 from Wikipedia")
-    tables = pd.read_html(url)
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    tables = pd.read_html(resp.text)
     symbols = tables[4]["Ticker"].tolist()
     print(f"[DEBUG] NASDAQ100 → {len(symbols)} tickers")
     return symbols
@@ -95,4 +99,3 @@ def update_tickers():
     except Exception as e:
         print(f"[ERROR] update_tickers failed: {e}")
         return {"status": "error", "detail": str(e)}
-
