@@ -55,3 +55,4 @@ def update_tickers():
 
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+    
