@@ -2,6 +2,7 @@ import os
 import requests
 import pandas as pd
 import psycopg2
+from psycopg2.extras import execute_values
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -62,14 +63,24 @@ def update_tickers():
         other = fetch_tickers_from_url(OTHER_URL)
         all_symbols = set(nasdaq + other)
 
-        sp500 = fetch_sp500()
-        nasdaq100 = fetch_nasdaq100()
+        sp500 = set(fetch_sp500())
+        nasdaq100 = set(fetch_nasdaq100())
+
+        # Готовим список для вставки
+        rows = []
+        for sym in all_symbols:
+            index_name = None
+            if sym in sp500:
+                index_name = "SP500"
+            elif sym in nasdaq100:
+                index_name = "NASDAQ100"
+            rows.append((sym, index_name))
 
         # Подключение к БД
         conn = get_pg_connection()
         cur = conn.cursor()
 
-        # Создание таблицы (index_name теперь допускает NULL)
+        # Создание таблицы
         cur.execute("""
         CREATE TABLE IF NOT EXISTS tickers (
             id SERIAL PRIMARY KEY,
@@ -82,17 +93,13 @@ def update_tickers():
         # Чистим старые данные
         cur.execute("TRUNCATE tickers RESTART IDENTITY")
 
-        # Записываем новые
-        for sym in all_symbols:
-            index_name = None
-            if sym in sp500:
-                index_name = "SP500"
-            elif sym in nasdaq100:
-                index_name = "NASDAQ100"
-            cur.execute(
-                "INSERT INTO tickers (symbol, index_name) VALUES (%s, %s)",
-                (sym, index_name)
-            )
+        # ⚡ Вставляем пачкой
+        execute_values(
+            cur,
+            "INSERT INTO tickers (symbol, index_name) VALUES %s",
+            rows,
+            page_size=500
+        )
 
         conn.commit()
         cur.close()
