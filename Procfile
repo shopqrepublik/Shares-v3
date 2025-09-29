@@ -1,1 +1,1 @@
-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT --log-level debug
+web: gunicorn -w 2 -k uvicorn.workers.UvicornWorker app.main:app --timeout 120
