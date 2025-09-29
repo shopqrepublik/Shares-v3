@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from app.portfolio import build_portfolio as build_core
+from app.routers.portfolio import build_portfolio as build_core
 from app.update_tickers import fetch_sp500, fetch_nasdaq100
 
 # --- Логирование ---
