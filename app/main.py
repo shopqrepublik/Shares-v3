@@ -31,8 +31,8 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://wealth-dashboard-ai.lovable.app",  # фронт
-        "http://localhost:5173",                   # локальная разработка
+        "https://wealth-dashboard-ai.lovable.app",
+        "http://localhost:5173",
         "http://127.0.0.1:5173"
     ],
     allow_credentials=True,
@@ -53,19 +53,16 @@ class OnboardRequest(BaseModel):
     horizon: str = "6m"
     knowledge: str = "beginner"
 
-# --- Мидлваря для API-ключа ---
-PUBLIC_PATHS = {"/health", "/ping", "/docs", "/openapi.json", "/redoc"}
-
-@app.middleware("http")
-async def verify_api_key(request: Request, call_next):
-    if request.url.path in PUBLIC_PATHS:
-        return await call_next(request)
-    key = request.headers.get("X-API-Key")
-    if key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
-    return await call_next(request)
-
 # --- Хелперы ---
+def check_api_key(request: Request):
+    # Пропускаем публичные эндпоинты
+    public_paths = ["/ping", "/health", "/docs", "/openapi.json", "/redoc"]
+    if request.url.path in public_paths:
+        return
+    api_key = request.headers.get("X-API-Key")
+    if api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 async def ai_annotate(portfolio):
     """AI-аннотации через OpenAI"""
     if not OPENAI_API_KEY:
@@ -103,18 +100,18 @@ async def ai_annotate(portfolio):
                 stock["forecast"] = "—"
     return portfolio
 
-# --- Публичные маршруты ---
-@app.get("/health")
-def health():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
-
+# --- Маршруты ---
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
-# --- Защищённые маршруты ---
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "time": datetime.utcnow().isoformat()}
+
 @app.post("/onboard")
-async def onboard(data: OnboardRequest):
+async def onboard(data: OnboardRequest, request: Request):
+    check_api_key(request)
     global USER_PROFILE
     USER_PROFILE = data.dict()
     logging.info(f"[ONBOARD] {USER_PROFILE}")
@@ -122,6 +119,7 @@ async def onboard(data: OnboardRequest):
 
 @app.post("/portfolio/build")
 async def build_portfolio_api(request: Request):
+    check_api_key(request)
     data = await request.json()
     profile_obj = SimpleNamespace(**data)
 
@@ -140,14 +138,16 @@ async def build_portfolio_api(request: Request):
     }
 
 @app.get("/portfolio/holdings")
-async def portfolio_holdings():
+async def portfolio_holdings(request: Request):
+    check_api_key(request)
     return {
         "portfolio": CURRENT_PORTFOLIO,
         "skipped": SKIPPED_TICKERS,
     }
 
 @app.get("/check_keys")
-async def check_keys():
+async def check_keys(request: Request):
+    check_api_key(request)
     return {
         "OPENAI_API_KEY": "set" if OPENAI_API_KEY else "missing",
         "ALPACA_API_KEY": "set" if ALPACA_API_KEY else "missing",
@@ -156,7 +156,9 @@ async def check_keys():
     }
 
 @app.post("/update_tickers")
-async def update_tickers():
+async def update_tickers(request: Request):
+    check_api_key(request)
+
     if not DB_URL:
         raise HTTPException(status_code=500, detail="DATABASE_URL not set")
 
@@ -192,7 +194,6 @@ async def update_tickers():
         logging.error(f"[UPDATE_TICKERS] ❌ {e}")
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
-# --- CORS debug ---
 @app.get("/test-cors")
 async def test_cors():
     return {"message": "CORS OK"}
