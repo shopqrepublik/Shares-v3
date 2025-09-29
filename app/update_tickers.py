@@ -1,88 +1,71 @@
 import os
-import psycopg2
-from psycopg2.extras import execute_values
-import pandas as pd
 import requests
-import io
+import pandas as pd
+import psycopg2
+from fastapi import APIRouter
 
-DB_URL = os.getenv("DATABASE_URL")
+router = APIRouter()
 
-FTP_BASE = "ftp://ftp.nasdaqtrader.com/symboldirectory/"
+# ✅ HTTPS вместо FTP
+NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
+OTHER_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 
-NASDAQ_FILE = "nasdaqlisted.txt"
-OTHER_FILE = "otherlisted.txt"
-
-WIKI_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-WIKI_NASDAQ100_URL = "https://en.wikipedia.org/wiki/NASDAQ-100"
-
-
-def fetch_ftp_tickers():
-    """
-    Скачивает тикеры через FTP файлы NASDAQ и Other, возвращает список тикеров.
-    """
-    tickers = set()
-
-    # Helper to fetch a text file via FTP-over-HTTP
-    def fetch_txt(filename):
-        url = FTP_BASE + filename
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.text
-
-    # NASDAQ-listed
-    text = fetch_txt(NASDAQ_FILE)
-    # Файл обычно содержится в CSV-подобном формате, первая строка заголовков
-    df = pd.read_csv(io.StringIO(text), sep="|")
-    if "Symbol" in df.columns:
-        tickers.update(df["Symbol"].dropna().tolist())
-
-    # Other-listed (NYSE и др.)
-    text2 = fetch_txt(OTHER_FILE)
-    df2 = pd.read_csv(io.StringIO(text2), sep="|")
-    if "ACT Symbol" in df2.columns:
-        tickers.update(df2["ACT Symbol"].dropna().tolist())
-
-    return list(tickers)
-
+def fetch_tickers_from_url(url: str):
+    """Скачивает список тикеров с NASDAQ HTTP-зеркала"""
+    resp = requests.get(url)
+    resp.raise_for_status()
+    lines = resp.text.splitlines()
+    symbols = []
+    for line in lines[1:]:  # пропускаем заголовок
+        parts = line.split("|")
+        if len(parts) > 1 and parts[0] not in ("Symbol", "File Creation Time", ""):
+            symbols.append(parts[0].strip())
+    return symbols
 
 def fetch_sp500():
-    df = pd.read_html(WIKI_SP500_URL)[0]
-    return df["Symbol"].dropna().tolist()
-
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(url)
+    return tables[0]["Symbol"].tolist()
 
 def fetch_nasdaq100():
-    df = pd.read_html(WIKI_NASDAQ100_URL)[4]
-    return df["Ticker"].dropna().tolist()
+    url = "https://en.wikipedia.org/wiki/NASDAQ-100"
+    tables = pd.read_html(url)
+    return tables[4]["Ticker"].tolist()
 
-
+@router.post("/update_tickers")
 def update_tickers():
     try:
-        all_tickers = fetch_ftp_tickers()
-        sp500 = set(fetch_sp500())
-        nasdaq100 = set(fetch_nasdaq100())
+        # Получаем данные
+        nasdaq = fetch_tickers_from_url(NASDAQ_URL)
+        other = fetch_tickers_from_url(OTHER_URL)
+        all_symbols = set(nasdaq + other)
 
-        conn = psycopg2.connect(DB_URL)
+        sp500 = fetch_sp500()
+        nasdaq100 = fetch_nasdaq100()
+
+        # Подключение к БД
+        conn = psycopg2.connect(os.environ["DATABASE_URL"])
         cur = conn.cursor()
 
-        # Создаём таблицу если нет
+        # Создание таблицы
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS tickers (
-                symbol TEXT PRIMARY KEY,
-                index_name TEXT
-            )
+        CREATE TABLE IF NOT EXISTS tickers (
+            symbol TEXT PRIMARY KEY,
+            index_name TEXT
+        )
         """)
+
+        # Чистим старые данные
         cur.execute("TRUNCATE tickers")
 
-        rows = []
-        for sym in all_tickers:
-            label = None
+        # Записываем новые
+        for sym in all_symbols:
+            index_name = None
             if sym in sp500:
-                label = "SP500"
+                index_name = "SP500"
             elif sym in nasdaq100:
-                label = "NASDAQ100"
-            rows.append((sym, label))
-
-        execute_values(cur, "INSERT INTO tickers (symbol, index_name) VALUES %s", rows)
+                index_name = "NASDAQ100"
+            cur.execute("INSERT INTO tickers (symbol, index_name) VALUES (%s, %s)", (sym, index_name))
 
         conn.commit()
         cur.close()
@@ -90,9 +73,10 @@ def update_tickers():
 
         return {
             "status": "ok",
-            "total": len(all_tickers),
+            "total": len(all_symbols),
             "sp500_count": len(sp500),
-            "nasdaq100_count": len(nasdaq100),
+            "nasdaq100_count": len(nasdaq100)
         }
+
     except Exception as e:
         return {"status": "error", "detail": str(e)}
