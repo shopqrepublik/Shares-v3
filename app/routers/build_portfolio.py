@@ -24,12 +24,18 @@ def get_price_from_fmp(symbol: str) -> float | None:
     """
     Получить цену через FMP (fallback, если yfinance не сработал).
     """
+    if not FMP_API_KEY:
+        print("⚠️ Нет ключа FMP_API_KEY")
+        return None
+
     try:
         url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
         resp = requests.get(url, timeout=10)
         data = resp.json()
         if isinstance(data, list) and len(data) > 0 and "price" in data[0]:
             return float(data[0]["price"])
+        else:
+            print(f"❌ Ошибка API для {symbol}: пустой ответ {data}")
     except Exception as e:
         print(f"[FMP] Ошибка по {symbol}: {e}")
     return None
