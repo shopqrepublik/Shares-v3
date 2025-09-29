@@ -1,98 +1,91 @@
 import os
-import pandas as pd
-import yfinance as yf
 import psycopg2
+import pandas as pd
 import requests
-from datetime import datetime
+from psycopg2.extras import RealDictCursor
 
-# 🔑 API Keys
-FMP_API_KEY = os.getenv("FMP_API_KEY")
-
-# 📂 подключение к БД
+# =========================
+# Настройки
+# =========================
 DATABASE_URL = os.getenv("DATABASE_URL")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
-# === НОРМАЛИЗАЦИЯ ТИКЕРОВ ===
-def normalize_symbol(symbol: str) -> str:
-    """Нормализуем тикеры под Yahoo Finance"""
-    if symbol.endswith(".B"):
-        return symbol.replace(".B", "-B")  # BRK-B вместо BRK.B
-    return symbol.strip()
-
-# === FMP API ===
-def get_price_from_fmp(symbol: str):
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data and "price" in data[0]:
-                return data[0]["price"]
-    except Exception as e:
-        print(f"[FMP] Ошибка для {symbol}: {e}")
-    return None
-
-# === ПОДКЛЮЧЕНИЕ К БД ===
+# =========================
+# Функция для подключения к БД
+# =========================
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
-# === СОЗДАНИЕ ПОРТФЕЛЯ ===
-def build_portfolio(tickers, risk_profile="Balanced"):
-    portfolio = []
+# =========================
+# Получение цены из Finnhub
+# =========================
+def get_price_from_finnhub(symbol):
+    try:
+        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
 
-    for symbol in tickers:
-        norm_sym = normalize_symbol(symbol)
-        price = None
-        momentum = None
+        # Ответ Finnhub:
+        # {
+        #   "c": 261.74,   # Current price
+        #   "h": 263.31,   # High price of the day
+        #   "l": 260.68,   # Low price of the day
+        #   "o": 261.07,   # Open price of the day
+        #   "pc": 259.45   # Previous close price
+        # }
 
-        try:
-            # --- 1️⃣ Пробуем через yfinance
-            data = yf.download(norm_sym, period="6mo", progress=False)
-            if data.empty:
-                raise ValueError("Yahoo вернул пустые данные")
-            price = float(data["Close"].iloc[-1])
-            momentum = (price / data["Close"].iloc[0]) - 1
+        if "c" in data and data["c"] > 0:
+            return data["c"]
+        else:
+            print(f"[FINNHUB] Пустой ответ для {symbol}: {data}")
+            return None
 
-        except Exception as e:
-            print(f"[YF] Ошибка для {norm_sym}: {e}, пробую FMP...")
-            price = get_price_from_fmp(norm_sym)
+    except Exception as e:
+        print(f"[FINNHUB] Ошибка получения цены для {symbol}: {e}")
+        return None
 
-        if price is None:
-            print(f"[❌] Нет данных для {norm_sym}, пропускаю")
-            continue
-
-        portfolio.append({
-            "symbol": norm_sym,
-            "price": price,
-            "momentum": momentum if momentum else 0.0,
-            "weight": 1 / len(tickers),  # ⚖️ равные веса
-            "pattern": None,
-            "updated_at": datetime.utcnow()
-        })
-
-    # --- Сохраняем в БД ---
+# =========================
+# Построение портфеля
+# =========================
+def build_portfolio(risk_profile="Balanced"):
     conn = get_db_connection()
     cur = conn.cursor()
 
-    cur.execute("DELETE FROM portfolio_holdings;")  # очищаем старый портфель
+    # Забираем тикеры из таблицы tickers
+    cur.execute("SELECT symbol FROM tickers WHERE index_name IN ('SP500', 'NASDAQ100') LIMIT 50;")
+    rows = cur.fetchall()
+    symbols = [row["symbol"] for row in rows]
 
-    for row in portfolio:
-        cur.execute(
-            """
-            INSERT INTO portfolio_holdings (symbol, price, momentum, weight, pattern, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (row["symbol"], row["price"], row["momentum"], row["weight"], row["pattern"], row["updated_at"])
-        )
+    portfolio = []
+    weight = 1 / len(symbols) if symbols else 0
+
+    for symbol in symbols:
+        price = get_price_from_finnhub(symbol)
+        if price:
+            portfolio.append({"symbol": symbol, "price": price, "weight": weight})
+            # сохраняем в holdings
+            cur.execute(
+                """
+                INSERT INTO portfolio_holdings (symbol, weight, last_price, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (symbol) DO UPDATE
+                SET weight = EXCLUDED.weight,
+                    last_price = EXCLUDED.last_price,
+                    updated_at = NOW();
+                """,
+                (symbol, weight, price),
+            )
 
     conn.commit()
     cur.close()
     conn.close()
 
-    print(f"[✅] Портфель построен: {len(portfolio)} тикеров")
     return portfolio
 
-
+# =========================
+# Запуск для теста
+# =========================
 if __name__ == "__main__":
-    # ⚡ Тестовый запуск
-    tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "BRK-B"]
-    build_portfolio(tickers)
+    portfolio = build_portfolio("Balanced")
+    print(pd.DataFrame(portfolio))
