@@ -95,3 +95,4 @@ def update_tickers():
     except Exception as e:
         print(f"[ERROR] update_tickers failed: {e}")
         return {"status": "error", "detail": str(e)}
+
